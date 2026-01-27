@@ -6,7 +6,7 @@ Professional-grade Open WebUI filter designed to streamline the image generation
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Plugin](https://img.shields.io/badge/Open%20WebUI-Plugin-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
-![Stars](https://img.shields.io/github/stars/annibale-x/Easymage?style=social)
+<!-- ![Stars](https://img.shields.io/github/stars/annibale-x/Easymage?style=social) -->
 
 ---
 
