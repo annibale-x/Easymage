@@ -1,7 +1,12 @@
 
 ## 🚀 Easymage  v0.6.3: Multilingual Prompt Enhancer & Vision QC
 
-**Easymage** is a professional-grade Open WebUI filter designed to streamline the image generation workflow and automate post-generation technical analysis. By simply prepending the `img ` keyword to any message, you trigger an advanced end-to-end pipeline.
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
+![Open WebUI Plugin](https://img.shields.io/badge/Open%20WebUI-Plugin-blue?style=flat&logo=openai)
+![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
+![Stars](https://img.shields.io/github/stars/annibale-x/Easymage?style=social)
+
+Professional-grade Open WebUI filter designed to streamline the image generation workflow and automate post-generation technical analysis. By simply prepending the `img ` keyword to any message, you trigger an advanced end-to-end pipeline.
 
 ---
 
