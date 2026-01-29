@@ -1,6 +1,6 @@
 """
 Title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-Version: 0.6.3
+Version: 0.6.12
 https://github.com/annibale-x/Easymage
 Author: Hannibal
 Author_url: https://openwebui.com/u/h4nn1b4l
@@ -29,6 +29,7 @@ import time
 import base64
 import os
 import sys
+import requests
 from typing import Optional, Any, Callable
 from pydantic import BaseModel, Field
 from open_webui.routers.images import image_generations, CreateImageForm
@@ -38,26 +39,15 @@ from open_webui.main import generate_chat_completion
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
+class Store(dict):
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError:
+            raise AttributeError(f"Store has no attribute '{item}'")
 
-class Generation(BaseModel):
-    engine: str = ""
-    model: str = ""
-    size: str = "1024x1024"
-    steps: int = 25
-    config: dict = {}
-    image_url: str | None = None
-    audit: dict = {}
-
-
-class Model(BaseModel):
-    name: str = ""
-    vision: bool = False
-    generation: Generation = Generation()
-    language: str = "English"
-    valves: dict = {}
-    user_prompt: str | None = None
-    enhanced_prompt: str | None = None
-    trigger: str | None = None
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 
 class Filter:
@@ -67,24 +57,45 @@ class Filter:
             default=True, description="Enrich prompt details."
         )
 
-        generation_quality_audit: bool = Field(
+        quality_audit: bool = Field(
             default=True, description="Post-generation Image Quality Audit."
         )
 
-        generation_size_override: Optional[str] = Field(
+        steps: Optional[int] = Field(
+            default=None, description="Force step count (if supported)."
+        )
+
+        size: Optional[str] = Field(
             default=None, description="Force size (e.g. 1024x1024)."
         )
-        generation_model_override: Optional[str] = Field(
+
+        cfg_scale: Optional[int] = Field(default=None, description="cfg_scale")
+
+        distilled_cfg_scale: Optional[int] = Field(
+            default=None, description="distilled_cfg_scale"
+        )
+
+        sampler_name: Optional[int] = Field(default=None, description="sampler_name")
+
+        scheduler: Optional[int] = Field(default=None, description="scheduler")
+
+        model: Optional[str] = Field(
             default=None,
             description="Force generation model.",
         )
-        generation_steps_override: Optional[int] = Field(
-            default=None, description="Force step count (if supported)."
+
+        # --- Advanced settings ---
+
+        unload_other_models: bool = Field(
+            default=False,
+            description="Unload all models from VRAM except the current one.",
         )
+
         persistent_vision_cache: bool = Field(
             default=False,
             description="Saves vision probe results to disk to avoid re-testing",
         )
+
         debug: bool = Field(
             default=False,
             description="Enable debug mode to print logs to the Docker console.",
@@ -92,12 +103,22 @@ class Filter:
 
     def __init__(self):
 
-        self.model = Model()
+        self.model = Store({})
+        self.input = Store({})
+        self.engine = Store({})
         self.valves = self.Valves()
         self.performance_stats = []
         self.vision_cache = {}
         self.cumulative_tokens = 0
         self.cumulative_elapsed_time = 0.0
+
+    def _register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
+        self.cumulative_tokens += token_count
+        self.cumulative_elapsed_time += elapsed
+        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
+        self.performance_stats.append(
+            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tokens_per_second:.1f} tk/s"
+        )
 
     def _unwrap(self, obj):
         if hasattr(obj, "value"):
@@ -123,13 +144,65 @@ class Filter:
         )
         return k.lower()
 
-    def _register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
-        self.cumulative_tokens += token_count
-        self.cumulative_elapsed_time += elapsed
-        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
-        self.performance_stats.append(
-            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tokens_per_second:.1f} tk/s"
+    def _normalize_sampler(self, name):
+        n = (
+            name.lower()
+            .replace("_", "")
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("++", "")
         )
+
+        mapping = {
+            "d3s": "DPM++ 3M SDE",
+            "d2sh": "DPM++ 2M SDE Heun",
+            "d2s": "DPM++ 2M SDE",
+            "d2m": "DPM++ 2M",
+            "d2sa": "DPM++ 2S a",
+            "ds": "DPM++ SDE",
+            "ea": "Euler a",
+            "e": "Euler",
+            "l": "LMS",
+            "h": "Heun",
+            "d2": "DPM2",
+            "d2a": "DPM2 a",
+            "df": "DPM fast",
+            "dad": "DPM adaptive",
+            "r": "Restart",
+            "h2": "HeunPP2",
+            "ip": "IPNDM",
+            "ipv": "IPNDM_V",
+            "de": "DEIS",
+            "u": "UniPC",
+            "lcm": "LCM",
+            "di": "DDIM",
+            "dic": "DDIM CFG++",
+            "dp": "DDPM",
+        }
+        return mapping.get(n, name)
+
+    def _normalize_scheduler(self, name):
+        n = name.lower().replace("_", "").replace(" ", "").replace("-", "")
+
+        mapping = {
+            "a": "Automatic",
+            "u": "Uniform",
+            "k": "Karras",
+            "e": "Exponential",
+            "pe": "Polyexponential",
+            "su": "SGM Uniform",
+            "ko": "KL Optimal",
+            "ays": "Align Your Steps",
+            "aysg": "Align Your Steps GITS",
+            "ays11": "Align Your Steps 11",
+            "ays32": "Align Your Steps 32",
+            "s": "Simple",
+            "n": "Normal",
+            "di": "DDIM",
+            "b": "Beta",
+            "t": "Turbo",
+        }
+        return mapping.get(n, name.capitalize())
 
     def _suppress_output(self, body: dict) -> dict:
         body["messages"] = [{"role": "assistant", "content": ""}]
@@ -138,6 +211,7 @@ class Filter:
         return body
 
     def _check_input(self, body: dict) -> str | None:
+
         if body.get("is_probe"):
             return None
 
@@ -152,36 +226,148 @@ class Filter:
             else last_message_content
         )
 
-        match = re.match(r"^(img|exp)\s", input_text, re.IGNORECASE)
+        match = re.match(r"^(img|imgx)\s", input_text, re.IGNORECASE)
 
         if not match:
             return None
 
-        trigger = match.group(1).lower()
-
-        self.model.trigger = trigger
+        self.model["trigger"] = match.group(1).lower()
 
         return input_text[match.end() :].strip()
 
-    async def _create_model(
-        self,
-        __event_emitter__: Callable,
-        __request__: Any,
-        __user__: Any,
-        body: dict,
-        user_prompt: str,
-    ):
+    def _parse_input(self, user_prompt):
 
-        if "features" in body:
-            body["features"] = {}
-            body["features"]["web_search"] = False
+        # Initialize parsed data structure
+        parsed_data = {
+            "flags": {"debug": None, "enhanced_prompt": None, "audit": None},
+            "params": {
+                "steps": None,
+                "size": None,
+                "distilled_cfg_scale": None,
+                "cfg_scale": None,
+                "sampler_name": None,
+                "scheduler": None,
+            },
+            "styles": [],
+            "subject": "",
+            "negative_prompt": "",
+        }
 
-        self.performance_stats = []
-        self.cumulative_tokens = 0
-        self.cumulative_elapsed_time = 0.0
-        self.start_time = time.time()
+        # --- 1. CLEAN TRIGGER (Immediate) ---
+        clean_prompt = re.sub(
+            r"^imgx?\s*", "", user_prompt.strip(), flags=re.IGNORECASE
+        )
 
-        conf = __request__.app.state.config
+        # --- 2. SPLIT NEGATIVE PROMPT (Last occurrence on the right) ---
+        neg_pattern = r"(.*)\s*--\s*no\b\s*(.*)"
+        neg_match = re.search(neg_pattern, clean_prompt, re.IGNORECASE | re.DOTALL)
+
+        if neg_match:
+            main_part = neg_match.group(1).strip()
+            parsed_data["negative_prompt"] = neg_match.group(2).strip()
+        else:
+            main_part = clean_prompt
+
+        # --- 3. SPLIT SUBJECT (Smart Separator) ---
+        if "--" in main_part:
+            # Explicit split for styles
+            prefix_part, subject_part = main_part.rsplit("--", 1)
+            parsed_data["subject"] = subject_part.strip()
+        else:
+            # Implicit split: find where parameters/flags end
+            last_technical_match = list(
+                re.finditer(r'(\b\w+=(?:".*?"|\S+))|([+-][dpa])', main_part)
+            )
+            if last_technical_match:
+                split_pos = last_technical_match[-1].end()
+                prefix_part = main_part[:split_pos]
+                parsed_data["subject"] = main_part[split_pos:].strip()
+            else:
+                prefix_part = ""
+                parsed_data["subject"] = main_part.strip()
+
+        # --- 4. EXTRACT FLAGS ([+-][dpa]) ---
+        flags_found = re.findall(r"([+-][dpa])", prefix_part)
+        for flag in flags_found:
+            val = flag[0] == "+"
+            char = flag[1]
+            if char == "d":
+                parsed_data["flags"]["debug"] = val
+            elif char == "p":
+                parsed_data["flags"]["enhanced_prompt"] = val
+            elif char == "a":
+                parsed_data["flags"]["audit"] = val
+            prefix_part = prefix_part.replace(flag, "")
+
+        # --- 5. EXTRACT KV PARAMETERS ---
+        param_pattern = r'(\b\w+)=("(?:\\.|[^"\\])*"|\S+)'
+        params_found = re.findall(param_pattern, prefix_part)
+
+        for key, value in params_found:
+            clean_val = value.strip("\"'")
+            if key == "s":
+                parsed_data["params"]["steps"] = int(clean_val)
+            elif key == "sz":
+                parsed_data["params"]["size"] = (
+                    f"{clean_val}x{clean_val}" if "x" not in clean_val else clean_val
+                )
+            elif key == "dcs":
+                parsed_data["params"]["distilled_cfg_scale"] = float(clean_val)
+                parsed_data["params"]["cfg_scale"] = 1.0
+            elif key == "cs":
+                if parsed_data["params"]["cfg_scale"] is None:
+                    parsed_data["params"]["cfg_scale"] = float(clean_val)
+            elif key == "smp":
+                parsed_data["params"]["sampler_name"] = self._normalize_sampler(
+                    clean_val
+                )
+            elif key == "sch":
+                parsed_data["params"]["scheduler"] = self._normalize_scheduler(
+                    clean_val
+                )
+
+            prefix_part = prefix_part.replace(f"{key}={value}", "")
+
+        # --- 6. REMAINING PREFIX AS STYLES ---
+        if prefix_part.strip():
+            parsed_data["styles"] = [
+                s.strip() for s in prefix_part.split(",") if s.strip()
+            ]
+
+        # --- 7. APPLY VALVE OVERRIDES ---
+        # Note: Added logic for actual valve names based on your provided function
+        if parsed_data["flags"]["debug"] is not None:
+            self.model.debug = parsed_data["flags"]["debug"]
+        if parsed_data["flags"]["enhanced_prompt"] is not None:
+            self.model.enhanced_prompt = parsed_data["flags"]["enhanced_prompt"]
+        if parsed_data["flags"]["audit"] is not None:
+            self.model.quality_audit = parsed_data["flags"]["audit"]
+
+        if parsed_data["params"]["steps"]:
+            self.model.steps = parsed_data["params"]["steps"]
+        if parsed_data["params"]["size"]:
+            self.model.size = parsed_data["params"]["size"]
+        if parsed_data["params"]["distilled_cfg_scale"]:
+            self.model.distilled_cfg_scale = parsed_data["params"][
+                "distilled_cfg_scale"
+            ]
+        if parsed_data["params"]["cfg_scale"] is not None:
+            self.model.cfg_scale = parsed_data["params"]["cfg_scale"]
+        if parsed_data["params"]["sampler_name"]:
+            self.model.sampler_name = parsed_data["params"]["sampler_name"]
+        if parsed_data["params"]["scheduler"]:
+            self.model.scheduler = parsed_data["params"]["scheduler"]
+
+        # Update model state
+        self.model.user_prompt = parsed_data["subject"]
+        self.model.styles = parsed_data["styles"]
+        self.model.negative_prompt = parsed_data["negative_prompt"]
+
+        self.input = parsed_data
+
+    def _get_engine_settings(self, body):
+
+        conf = self.request.app.state.config
         state_dict = getattr(conf, "_state", {})
 
         active_engine = self._unwrap(
@@ -221,55 +407,46 @@ class Filter:
                 if val is not None:
                     engine_settings[self._clean_key(k, active_engine)] = val
 
-        self.model.generation = Generation(**common_settings)
-        self.model.generation.config = engine_settings
-        self.model.name = body.get("model", "")
-        self.model.valves = self.valves
-        self.model.user_prompt = user_prompt
-        self.context = UserModel(**__user__)
-        self.emitter = __event_emitter__
-        self.request = __request__
-
-        for key in ["model", "size", "steps"]:
-            val = getattr(self.model.valves, f"generation_{key}_override", None)
-            if val is not None:
-                setattr(self.model.generation, key, val)
-
-        await self._check_vision()
-        await self._detect_language()
-        await self._enhance_prompt()
-
-        return
+        self.engine = {**common_settings, **engine_settings}
+        extra_params = (
+            engine_settings.pop("params", {})
+            if isinstance(engine_settings, dict)
+            else {}
+        )
+        self.model.update(common_settings)
+        self.model.update(engine_settings)
+        self.model.update(extra_params)
 
     async def _check_vision(self):
-        self._dbg(f"Starting vision probe for: {self.model.name}")
 
-        if self.valves.debug or not self.valves.persistent_vision_cache:
+        self._dbg(f"Starting vision probe for: {self.model.id}")
+
+        if self.model.debug or not self.model.persistent_vision_cache:
             self.vision_cache.clear()
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
                 self._dbg("Cache cleared.")
 
-        if self.model.name in self.vision_cache:
+        if self.model.id in self.vision_cache:
             self._dbg(
-                f"Found in memory cache: {self.model.name} = {self.vision_cache[self.model.name]}"
+                f"Found in memory cache: {self.model.id} = {self.vision_cache[self.model.id]}"
             )
-            return self.vision_cache[self.model.name]
+            return self.vision_cache[self.model.id]
 
         if os.path.exists(CAPABILITY_CACHE_PATH):
             try:
                 with open(CAPABILITY_CACHE_PATH, "r") as f:
                     data = json.load(f)
                     self.vision_cache.update(data)
-                    if self.model.name in self.vision_cache:
+                    if self.model.id in self.vision_cache:
                         self._dbg(
-                            f"Found on disk: {self.model.name} = {self.vision_cache[self.model.name]}"
+                            f"Found on disk: {self.model.id} = {self.vision_cache[self.model.id]}"
                         )
-                        return self.vision_cache[self.model.name]
+                        return self.vision_cache[self.model.id]
             except Exception as e:
                 await self._err(e)
 
-        self._dbg(f"Model {self.model.name} not in cache. Probing...")
+        self._dbg(f"Model {self.model.id} not in cache. Probing...")
         b64_pixels = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAS0lEQVQ4jWNkYGB4ycDAwMPAwMDEgAn+ERD7wQLVzIVFITGABZutJAEmBuxOJ8kAil0w8AZgiyr6umAYGDDEA5GFgYHhB5QmB/wAAIcLCBsQodqvAAAAAElFTkSuQmCC"
 
         test_messages = [
@@ -294,12 +471,12 @@ class Filter:
 
         has_vision = False
         try:
-            self._dbg(f"Calling generate_chat_completion for {self.model.name}")
+            self._dbg(f"Calling generate_chat_completion for {self.model.id}")
 
             response = await generate_chat_completion(
                 request=self.request,
                 form_data={
-                    "model": self.model.name,
+                    "model": self.model.id,
                     "messages": test_messages,
                     "stream": False,
                     "is_probe": True,
@@ -309,21 +486,21 @@ class Filter:
 
             if response and "choices" in response:
                 content = response["choices"][0]["message"].get("content", "").strip()
-                self._dbg(f"Model {self.model.name} replied: '{content}'")
+                self._dbg(f"Model {self.model.id} replied: '{content}'")
                 has_vision = "1" in content
             else:
-                self._dbg(f"Probe response null or invalid for {self.model.name}")
+                self._dbg(f"Probe response null or invalid for {self.model.id}")
 
         except Exception as e:
-            await self._err(f"Probe failed for {self.model.name}: {e}")
+            await self._err(f"Probe failed for {self.model.id}: {e}")
             has_vision = False
 
-        self.vision_cache[self.model.name] = has_vision
+        self.vision_cache[self.model.id] = has_vision
         try:
             os.makedirs(os.path.dirname(CAPABILITY_CACHE_PATH), exist_ok=True)
             with open(CAPABILITY_CACHE_PATH, "w") as f:
                 json.dump(self.vision_cache, f)
-            self._dbg(f"Cache updated on disk for {self.model.name}")
+            self._dbg(f"Cache updated on disk for {self.model.id}")
         except Exception as e:
             await self._err(f"Disk write failed: {e}")
 
@@ -349,7 +526,7 @@ class Filter:
 
         try:
             detect_payload = {
-                "model": self.model.name,
+                "model": self.model.id,
                 "messages": [
                     {
                         "role": "system",
@@ -388,9 +565,9 @@ class Filter:
 
     async def _enhance_prompt(self):
 
-        self.model.enhanced_prompt = self.model.user_prompt
+        # self.model.enhanced_prompt = self.model.user_prompt
 
-        if self.valves.enhanced_prompt or self.model.trigger == "exp":
+        if self.model.enhanced_prompt or self.model.trigger == "imgx":
             self._dbg("Starting Prompt Enhancing...")
             start_timestamp = time.time()
             await self.emitter(
@@ -410,7 +587,7 @@ class Filter:
                 user_content = f"Expand this prompt: {self.model.user_prompt}"
 
                 refine_payload = {
-                    "model": self.model.name,
+                    "model": self.model.id,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
@@ -454,112 +631,161 @@ class Filter:
 
         return
 
-    async def _generate_image(self):
 
-        self._dbg(
-            f"Requesting Image Generation for model: {self.model.generation.model}"
-        )
-
-        await self.emitter(
-            {
-                "type": "status",
-                "data": {
-                    "description": f"Generating {self.model.generation.size} Image...",
-                    "done": False,
-                },
-            }
-        )
-
+    async def _generate_image(self, body):
         image_gen_start = time.time()
+        # Detect current engine
+        engine = self.request.app.state.config.IMAGE_GENERATION_ENGINE
+        
         try:
-            gen_res = await image_generations(
-                request=self.request,
-                form_data=CreateImageForm(
+            if engine in ["automatic1111", ""]:
+                self._dbg("Using Forge Direct Bypass (Force params)...")
+                
+                # --- PAYLOAD FORGE ---
+                payload = {
+                    "prompt": self.model.enhanced_prompt,
+                    "negative_prompt": self.model.negative_prompt,
+                    "batch_size": 1,
+                    "steps": self.model.steps if self.model.steps else 30,
+                    "cfg_scale": 1,
+                    "distilled_cfg_scale": 3,
+                    "sampler_name": self.model.sampler_name if self.model.sampler_name else "Euler",
+                    "scheduler": self.model.scheduler if self.model.scheduler else "Simple",
+                }
+                if self.model.size:
+                    try:
+                        w, h = map(int, self.model.size.split("x"))
+                        payload["width"], payload["height"] = w, h
+                    except: pass
+
+                # --- CALL FORGE ---
+                base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL.rstrip('/')
+                api_url = f"{base_url}/sdapi/v1/txt2img"
+                
+                headers = {}
+                api_auth = self.request.app.state.config.AUTOMATIC1111_API_AUTH
+                if api_auth:
+                    if ":" in api_auth:
+                        auth_b64 = base64.b64encode(api_auth.encode()).decode()
+                        headers["Authorization"] = f"Basic {auth_b64}"
+                    else:
+                        headers["Authorization"] = f"Bearer {api_auth}"
+
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    r = await client.post(api_url, json=payload, headers=headers, timeout=None)
+                    r.raise_for_status()
+                    res = r.json()
+
+                # --- PROCESS FORGE RESPONSE ---
+                if "images" in res and res["images"]:
+                    img_b64 = res["images"][0]
+                    if "," in img_b64: img_b64 = img_b64.split(",")[1]
+                    
+                    # Store for Vision Audit
+                    self.model.b64_data = img_b64
+                    self.model.image_url = f"data:image/png;base64,{img_b64}"
+                else:
+                    raise Exception("No images in Forge response")
+
+            else:
+                self._dbg(f"Using Standard OWUI Router for engine: {engine}")
+                # Fallback to standard Pydantic form
+                form_data = CreateImageForm(
                     prompt=self.model.enhanced_prompt,
                     n=1,
-                    size=self.model.generation.size,
-                    model=self.model.generation.model,
-                ),
-                user=self.context,
-            )
+                    size=self.model.size,
+                    model=self.model.model
+                )
+                
+                gen_res = await image_generations(
+                    request=self.request,
+                    form_data=form_data,
+                    user=self.context,
+                )
+                
+                if gen_res and len(gen_res) > 0:
+                    self.model.image_url = gen_res[0]["url"]
+                    # For standard engine, we don't have b64_data in memory
+                    if hasattr(self.model, 'b64_data'): del self.model.b64_data
+                else:
+                    raise Exception("Standard image generation failed")
 
-            if not gen_res:
-                return None
-
+            # Finalize
             self.image_gen_time_int = int(time.time() - image_gen_start)
-            self.model.generation.image_url = gen_res[0]["url"]
-            self._dbg(f"Image Generated. URL: {self.model.generation.image_url}")
-
-            await self.emitter(
-                {
-                    "type": "message",
-                    "data": {
-                        "content": f"![Generated Image]({self.model.generation.image_url})"
-                    },
-                }
-            )
+            await self.emitter({
+                "type": "message",
+                "data": {"content": f"![Generated Image]({self.model.image_url})"}
+            })
 
         except Exception as e:
-            await self._err(f"Image Generation failed: {e}")
+            await self._err(f"Image Generation failed ({engine}): {e}")
 
-        return
+
+
+
 
     async def _vision_audit(self):
-
         audit_results = {"score": None, "critique": None, "emoji": "⚪"}
 
-        if not self.valves.generation_quality_audit or not self.model.vision:
+        if not self.valves.quality_audit or not self.model.vision:
             return audit_results
 
         self._dbg("Starting Vision Quality Audit...")
-        await self.emitter(
-            {
-                "type": "status",
-                "data": {"description": "Visual Quality Audit...", "done": False},
-            }
-        )
-
+        await self.emitter({
+            "type": "status",
+            "data": {"description": "Visual Quality Audit...", "done": False},
+        })
         audit_start = time.time()
         try:
-            img_file_id = (
-                self.model.generation.image_url.split("/")[-2]
-                if "files" in self.model.generation.image_url
-                else None
-            )
-            if not img_file_id:
-                return audit_results
+            # --- HYBRID IMAGE LOADING ---
+            if hasattr(self.model, 'b64_data') and self.model.b64_data:
+                self._dbg("Audit: Using image from memory (Base64)")
+                image_url_for_vision = f"data:image/png;base64,{self.model.b64_data}"
+            else:
+                self._dbg(f"Audit: Loading image from URL: {self.model.image_url}")
+                image_url_for_vision = self.model.image_url
+            # -----------------------------
 
-            file_record = Files.get_file_by_id(img_file_id)
-            with open(file_record.path, "rb") as f:
-                encoded_image = base64.b64encode(f.read()).decode("utf-8")
+            audit_instruction=f"""
+                RESET: ######################################### NEW DATA STREAM - NO PREVIOUS CONTEXT ACCESSIBLE ###########################################            
+                            
+                ENVIRONMENT: IGNORE ALL PRIOR CONTEXT. NEURAL CACHE RESET. STARTING FROM ZERO-STATE.
 
-            # Modification: Open-ended audit to minimize bias and allow dynamic evaluation
-            # audit_instruction = (
-            # f"AUDIT TASK: Compare the attached image with this reference prompt: '{self.model.enhanced_prompt}'.\n"
-            # f"INSTRUCTIONS:\n"
-            # f"1. Describe what you actually see in the image.\n"
-            # f"2. Critically evaluate the image's technical execution and its alignment with the prompt's requirements.\n"
-            # f"3. Identify any contradictions, missing elements, or hallucinations (like objects that shouldn't be there).\n"
-            # f"STRICT RULES: Respond in {self.model.language}. NO MARKDOWN. Use plain text and • for lists. "
-            # f"Do not use pre-defined categories if they don't apply. Be objective and impartial. "
-            # f"END YOUR RESPONSE WITH 'SCORE:X' (0-100)."
-            # )
+                ENVIRONMENT: STATELESS SANDBOX. Treat this as the first and only image in history.
 
-            audit_instruction = (
-                f"AUDIT TASK: Compare the attached image with this reference prompt: '{self.model.enhanced_prompt}'.\n"
-                f"INSTRUCTIONS:\n"
-                f"1. Describe what you actually see in the image.\n"
-                f"2. Critically evaluate the image's technical execution and its alignment with the prompt's requirements.\n"
-                f"3. Identify any contradictions, missing elements, or hallucinations.\n"
-                f"STRICT RULES: Respond in {self.model.language}. NO MARKDOWN. Use plain text and • for lists. "
-                f"Do not use pre-defined categories if they don't apply. Be objective and impartial. "
-                f"END YOUR RESPONSE WITH 'SCORE:X' (0-100)."
-            )
+                RULE: Context Break. Terminate processing of previous context.
 
+                RULE: Clear your working memory buffer and analyze this input in total isolation.
+
+                TASK: AUDIT ANALYSIS (Audit scores is 0 to 100, where 0 is bad and 100 good): 
+                        Compare the image with the reference prompt: '{self.model.enhanced_prompt}', 
+                        Describe what you actually see in the image.
+                        Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
+                        Identify any contradictions, missing elements, or hallucinations (like objects that shouldn't be there).
+                        Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line. 
+                    
+                RULE: Be extremely severe in technical evaluation. Do not excuse defects as limitations of resolution or scale.
+
+                TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
+                        Perform a ruthless technical audit. Identify every visual flaw.
+                        Evaluate NOISE as random pixel color variations.
+                        Evaluate GRAIN as textural salt-and-pepper luminance noise.
+                        Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
+                        Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
+
+                MANDATORY: Respond in {self.model.language}. NO MARKDOWN. Use plain text and • for lists. Be objective.
+
+                MANDATORY: Your final response MUST end with a single line containing only the following metrics:
+
+                SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+            """
+            
+            
             vision_res = await generate_chat_completion(
                 request=self.request,
                 form_data={
-                    "model": self.model.name,
+                    "model": self.model.id,
                     "messages": [
                         {
                             "role": "user",
@@ -567,9 +793,7 @@ class Filter:
                                 {"type": "text", "text": audit_instruction},
                                 {
                                     "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{encoded_image}"
-                                    },
+                                    "image_url": {"url": image_url_for_vision},
                                 },
                             ],
                         }
@@ -607,7 +831,125 @@ class Filter:
             await self._err(f"Vision Audit failed: {e}")
             audit_results["critique"] = "Vision Audit failed."
 
-        self.model.generation.audit = audit_results
+        self.quality_audit = audit_results
+        return audit_results
+
+    async def _output_delivery(self):
+
+        total_exec_time = int(time.time() - self.start_time)
+        clean_prompt = self.model.enhanced_prompt.replace("*", "")
+
+        await self.emitter(
+            {
+                "type": "citation",
+                "data": {
+                    "source": {"name": "🚀 PROMPT"},
+                    "document": [clean_prompt],
+                    "metadata": [{"source": "1", "id": "p"}],
+                },
+            }
+        )
+        if self.model.quality_audit:
+            if not self.model.vision:
+                await self.emitter(
+                    {
+                        "type": "citation",
+                        "data": {
+                            "source": {"name": "‼️NO VISION"},
+                            "document": [
+                                f"Model {self.model.id} lacks vision capabilities for audit."
+                            ],
+                            "metadata": [{"source": "2", "id": "b"}],
+                        },
+                    }
+                )
+            elif self.quality_audit["critique"]:
+                await self.emitter(
+                    {
+                        "type": "citation",
+                        "data": {
+                            "source": {
+                                "name": f"{self.quality_audit['emoji']} SCORE: {self.quality_audit['score']}%"
+                            },
+                            "document": [
+                                self.quality_audit["critique"].replace("*", "")
+                            ],
+                            "metadata": [{"source": "2", "id": "a"}],
+                        },
+                    }
+                )
+
+        mm = "multimodal" if self.model.vision else "not multimodal"
+        tech_details = (
+            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.model.id} ({mm})\n → Engine Model: {self.valves.model}\n"
+            f" → Resolution: {self.valves.size} | Steps: {self.valves.steps}\n → Engine: {self.model.engine}\n"
+            f"\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲 𝗠𝗲𝘁𝗿𝗶𝗰𝘀\n → Total Time: {total_exec_time}s\n → Image Gen: {self.image_gen_time_int}s\n"
+            + "\n".join(self.performance_stats)
+        )
+        await self.emitter(
+            {
+                "type": "citation",
+                "data": {
+                    "source": {"name": "🔍 DETAILS"},
+                    "document": [tech_details],
+                    "metadata": [{"source": "3", "id": "d"}],
+                },
+            }
+        )
+
+        tps = (
+            self.cumulative_tokens / self.cumulative_elapsed_time
+            if self.cumulative_elapsed_time > 0
+            else 0
+        )
+        summary = f"{total_exec_time}s total | {self.image_gen_time_int}s img | {self.cumulative_tokens} tk | {tps:.1f} tk/s"
+
+        await self.emitter({"type": "message", "data": {"content": "\n\n[1] [2] [3]"}})
+        await self.emitter(
+            {"type": "status", "data": {"description": summary, "done": True}}
+        )
+
+    async def _create_model(
+        self,
+        __request__: Any,
+        __user__: Any,
+        body: dict,
+        user_prompt: str,
+    ):
+
+        if "features" in body:
+            body["features"] = {}
+            body["features"]["web_search"] = False
+
+        self.request = __request__
+        self.context = UserModel(**__user__)
+        self.performance_stats = []
+        self.cumulative_tokens = 0
+        self.cumulative_elapsed_time = 0.0
+        self.start_time = time.time()
+        self.model.id = body.get("model", "")
+        self._get_engine_settings(body)
+        self.model.update(
+            {k: v for k, v in self.valves.model_dump().items() if v is not None}
+        )
+        self._parse_input(user_prompt)
+
+        await self._check_vision()
+        await self._detect_language()
+        await self._enhance_prompt()
+
+        if self.valves.debug:
+            await self.emitter(
+                {
+                    "type": "message",
+                    "data": {
+                        "content": f"```\nModel: {json.dumps(self.model, indent=4)}\n```\n"
+                        f"```\nValves: {json.dumps(self.valves.model_dump(), indent=4)}\n```\n"
+                        f"```\nInput: {json.dumps(self.input, indent=4)}\n```\n"
+                    },
+                }
+            )
+
         return
 
     async def _output_prompt(self):
@@ -638,90 +980,28 @@ class Filter:
             {"type": "status", "data": {"description": summary, "done": True}}
         )
 
-    async def _output_delivery(self):
-
-        total_exec_time = int(time.time() - self.start_time)
-        clean_prompt = self.model.enhanced_prompt.replace("*", "")
-
-        await self.emitter(
-            {
-                "type": "citation",
-                "data": {
-                    "source": {"name": "🚀 PROMPT"},
-                    "document": [clean_prompt],
-                    "metadata": [{"source": "1", "id": "p"}],
-                },
-            }
-        )
-        if self.valves.generation_quality_audit:
-            if not self.model.vision:
-                await self.emitter(
-                    {
-                        "type": "citation",
-                        "data": {
-                            "source": {"name": "‼️NO VISION"},
-                            "document": [
-                                f"Model {self.model.name} lacks vision capabilities for audit."
-                            ],
-                            "metadata": [{"source": "2", "id": "b"}],
-                        },
-                    }
-                )
-            elif self.model.generation.audit["critique"]:
-                await self.emitter(
-                    {
-                        "type": "citation",
-                        "data": {
-                            "source": {
-                                "name": f"{self.model.generation.audit['emoji']} SCORE: {self.model.generation.audit['score']}%"
-                            },
-                            "document": [
-                                self.model.generation.audit["critique"].replace("*", "")
-                            ],
-                            "metadata": [{"source": "2", "id": "a"}],
-                        },
-                    }
-                )
-
-        mm = "multimodal" if self.model.vision else "not multimodal"
-        tech_details = (
-            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.model.name} ({mm})\n → Engine Model: {self.model.generation.model}\n"
-            f" → Resolution: {self.model.generation.size} | Steps: {self.model.generation.steps}\n → Engine: {self.model.generation.engine}\n"
-            f"\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲 𝗠𝗲𝘁𝗿𝗶𝗰𝘀\n → Image Gen: {self.image_gen_time_int}s\n → Total: {total_exec_time}s\n"
-            + "\n".join(self.performance_stats)
-        )
-        await self.emitter(
-            {
-                "type": "citation",
-                "data": {
-                    "source": {"name": "🔍 DETAILS"},
-                    "document": [tech_details],
-                    "metadata": [{"source": "3", "id": "d"}],
-                },
-            }
-        )
-
-        tps = (
-            self.cumulative_tokens / self.cumulative_elapsed_time
-            if self.cumulative_elapsed_time > 0
-            else 0
-        )
-        summary = f"{total_exec_time}s total | {self.image_gen_time_int}s img | {self.cumulative_tokens} tk | {tps:.1f} tk/s"
-
-        await self.emitter({"type": "message", "data": {"content": "\n\n[1] [2] [3]"}})
-        await self.emitter(
-            {"type": "status", "data": {"description": summary, "done": True}}
-        )
-
-    def _dmp(self):
+    def _dmp(self, data: Optional = None ):
         if self.valves.debug:
             header = "—" * 80 + "\n📦 EASYMAGE DUMP:\n" + "—" * 80
             print(header, file=sys.stderr, flush=True)
-            print(
-                json.dumps(self.model.model_dump(), indent=4),
-                file=sys.stderr,
-                flush=True,
-            )
+            if isinstance(data, dict):
+                print(
+                    "dict: " + json.dumps(data, indent=4),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif isinstance(data, BaseModel):
+                print(
+                    "BaseModel: " + json.dumps(data.model_dump(), indent=4),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    "...",
+                    file=sys.stderr,
+                    flush=True,
+                )
             print("—" * 80, file=sys.stderr, flush=True)
 
     def _dbg(self, message: str, error: bool = False):
@@ -734,7 +1014,7 @@ class Filter:
         self._dbg(str(e), True)
         if self.emitter:
             await self.emitter(
-                {"type": "message", "data": {"content": f"❌ ERROR: {str(e)}\n"}}
+                {"type": "message", "data": {"content": f"\n\n❌ EASYMAGE ERROR: {str(e)}\n"}}
             )
 
     async def inlet(
@@ -747,22 +1027,22 @@ class Filter:
 
         if not (user_prompt := self._check_input(body)):
             return body
-
+        
+        self.emitter = __event_emitter__
         try:
             self._dbg(f"Started")
-            await self._create_model(
-                __event_emitter__, __request__, __user__, body, user_prompt
-            )
+            await self._create_model( __request__, __user__, body, user_prompt)
             self._dbg(f"Raw user prompt: {self.model.user_prompt}")
 
         except Exception as e:
             await self._err(e)
+            
 
-        if self.model.trigger == "exp":
+
+        if self.model.trigger == "imgx":
             await self._output_prompt()
-
         else:
-            await self._generate_image()
+            await self._generate_image(body)
             await self._vision_audit()
             await self._output_delivery()
 
