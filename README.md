@@ -1,5 +1,5 @@
 
-## 🚀 Easymage  v0.6.3: Multilingual Prompt Enhancer & Vision QC
+## 🚀 Easymage  v0.6.3: Generative Imaging & Prompt Engineering Filter
 
 Professional-grade Open WebUI filter designed to streamline the image generation workflow and automate post-generation technical analysis. By simply prepending the `img ` keyword to any message, you trigger an advanced end-to-end pipeline.
 
