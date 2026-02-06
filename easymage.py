@@ -1,26 +1,11 @@
 """
 Title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-Version: 0.6.12
-https://github.com/annibale-x/Easymage
+Version: 0.6.13
+Repository: https://github.com/annibale-x/Easymage
 Author: Hannibal
 Author_url: https://openwebui.com/u/h4nn1b4l
 Author_email: annibale.x@gmail.com
-Description: Professional-grade image generation filter for Open WebUI.
-
-MAIN FEATURES:
-- DYNAMIC ENGINE DETECTION: Automatically identifies active image generation engines (A1111/ComfyUI/OpenAI).
-- PROMPT ENHANCING: Multi-language detection and English-centric prompt engineering.
-- SINGLE-PASS VISION AUDIT: Real-time technical quality analysis with integer-based scoring (0-100%).
-- PERFORMANCE ANALYTICS: Precise tracking of Token/s, LLM execution time, and raw image generation latency.
-- UI OPTIMIZATION: Custom Unicode formatting for environments where Markdown is restricted.
-
-LOGICAL FLOW:
-1. INLET INTERCEPTION: Captures "img " prefixed messages.
-2. CONTEXT ANALYSIS: Detects source language and engine parameters.
-3. REFINEMENT: Translates and enriches the user's intent into a high-fidelity English prompt.
-4. GENERATION: Triggers the backend image engine and records generation latency.
-5. VISION AUDIT: Passes the result to a Vision LLM for critique and scoring.
-6. DELIVERY: Emits formatted citations and status summaries.
+Description: Image generation filter for Open WebUI.
 """
 
 import json
@@ -39,6 +24,7 @@ from open_webui.main import generate_chat_completion
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
+
 class Store(dict):
     def __getattr__(self, item):
         try:
@@ -51,7 +37,10 @@ class Store(dict):
 
 
 class Filter:
+
     class Valves(BaseModel):
+
+        # --- Base settings ---
 
         enhanced_prompt: bool = Field(
             default=True, description="Enrich prompt details."
@@ -61,35 +50,12 @@ class Filter:
             default=True, description="Post-generation Image Quality Audit."
         )
 
-        steps: Optional[int] = Field(
-            default=None, description="Force step count (if supported)."
-        )
-
-        size: Optional[str] = Field(
-            default=None, description="Force size (e.g. 1024x1024)."
-        )
-
-        cfg_scale: Optional[int] = Field(default=None, description="cfg_scale")
-
-        distilled_cfg_scale: Optional[int] = Field(
-            default=None, description="distilled_cfg_scale"
-        )
-
-        sampler_name: Optional[int] = Field(default=None, description="sampler_name")
-
-        scheduler: Optional[int] = Field(default=None, description="scheduler")
-
-        model: Optional[str] = Field(
-            default=None,
-            description="Force generation model.",
-        )
-
         # --- Advanced settings ---
 
-        unload_other_models: bool = Field(
-            default=False,
-            description="Unload all models from VRAM except the current one.",
-        )
+        # unload_other_models: bool = Field(
+        #     default=False,
+        #     description="Unload all models from VRAM except the current one.",
+        # )
 
         persistent_vision_cache: bool = Field(
             default=False,
@@ -100,6 +66,33 @@ class Filter:
             default=False,
             description="Enable debug mode to print logs to the Docker console.",
         )
+
+        # --- Global Engine Settings ---
+
+        model: Optional[str] = Field(
+            default=None,
+            description="Force generation model.",
+        )
+
+        steps: int = 20
+        size: str = "1024x1024"
+
+        # --- Advanced Engine Settings
+
+        seed: int = -1
+        cfg_scale: float = 1.0
+        distilled_cfg_scale: float = 3.5
+        sampler_name: str = "Euler"
+        scheduler: str = "Simple"
+
+        # --- Advanced Engine Settings (High-Res and Batching)
+        enable_hr: bool = False
+        n_iter: int = 1
+        batch_size: int = 1
+        hr_scale: float = 2.0
+        hr_upscaler: str = "Latent"
+        hr_distilled_cfg: float = 3.5
+        denoising_strength: float = 0.45
 
     def __init__(self):
 
@@ -112,260 +105,83 @@ class Filter:
         self.cumulative_tokens = 0
         self.cumulative_elapsed_time = 0.0
 
-    def _register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
-        self.cumulative_tokens += token_count
-        self.cumulative_elapsed_time += elapsed
-        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
-        self.performance_stats.append(
-            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tokens_per_second:.1f} tk/s"
-        )
+    async def inlet(
+        self,
+        body: dict,
+        __user__: Optional[dict] = None,
+        __request__=None,
+        __event_emitter__=None,
+    ) -> dict:
 
-    def _unwrap(self, obj):
-        if hasattr(obj, "value"):
-            return self._unwrap(obj.value)
-        if isinstance(obj, dict):
-            return {k: self._unwrap(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._unwrap(i) for i in obj]
-        return obj
+        if not (user_prompt := self._check_input(body)):
+            return body
 
-    def _clean_key(self, key, engine):
-        k = key.upper()
-        k = (
-            k.replace("IMAGE_GENERATION_", "")
-            .replace("IMAGE_", "")
-            .replace("ENABLE_IMAGE_", "ENABLE_")
-        )
-        engine_prefix = f"{engine.upper()}_"
-        k = (
-            k.replace(f"{engine_prefix}API_", "")
-            .replace(engine_prefix, "")
-            .replace("IMAGES_", "")
-        )
-        return k.lower()
+        self.emitter = __event_emitter__
+        try:
+            self._dbg(f"Started")
+            await self._create_model(__request__, __user__, body, user_prompt)
+            self._dbg(f"Raw user prompt: {self.model.user_prompt}")
 
-    def _normalize_sampler(self, name):
-        n = (
-            name.lower()
-            .replace("_", "")
-            .replace(" ", "")
-            .replace("-", "")
-            .replace("++", "")
-        )
+        except Exception as e:
+            await self._err(e)
 
-        mapping = {
-            "d3s": "DPM++ 3M SDE",
-            "d2sh": "DPM++ 2M SDE Heun",
-            "d2s": "DPM++ 2M SDE",
-            "d2m": "DPM++ 2M",
-            "d2sa": "DPM++ 2S a",
-            "ds": "DPM++ SDE",
-            "ea": "Euler a",
-            "e": "Euler",
-            "l": "LMS",
-            "h": "Heun",
-            "d2": "DPM2",
-            "d2a": "DPM2 a",
-            "df": "DPM fast",
-            "dad": "DPM adaptive",
-            "r": "Restart",
-            "h2": "HeunPP2",
-            "ip": "IPNDM",
-            "ipv": "IPNDM_V",
-            "de": "DEIS",
-            "u": "UniPC",
-            "lcm": "LCM",
-            "di": "DDIM",
-            "dic": "DDIM CFG++",
-            "dp": "DDPM",
-        }
-        return mapping.get(n, name)
-
-    def _normalize_scheduler(self, name):
-        n = name.lower().replace("_", "").replace(" ", "").replace("-", "")
-
-        mapping = {
-            "a": "Automatic",
-            "u": "Uniform",
-            "k": "Karras",
-            "e": "Exponential",
-            "pe": "Polyexponential",
-            "su": "SGM Uniform",
-            "ko": "KL Optimal",
-            "ays": "Align Your Steps",
-            "aysg": "Align Your Steps GITS",
-            "ays11": "Align Your Steps 11",
-            "ays32": "Align Your Steps 32",
-            "s": "Simple",
-            "n": "Normal",
-            "di": "DDIM",
-            "b": "Beta",
-            "t": "Turbo",
-        }
-        return mapping.get(n, name.capitalize())
-
-    def _suppress_output(self, body: dict) -> dict:
-        body["messages"] = [{"role": "assistant", "content": ""}]
-        body["max_tokens"] = 1
-        body["stop"] = [chr(i) for i in range(128)]
-        return body
-
-    def _check_input(self, body: dict) -> str | None:
-
-        if body.get("is_probe"):
-            return None
-
-        messages = body.get("messages", [])
-        if not messages:
-            return None
-
-        last_message_content = messages[-1]["content"]
-        input_text = (
-            last_message_content[0].get("text", "")
-            if isinstance(last_message_content, list)
-            else last_message_content
-        )
-
-        match = re.match(r"^(img|imgx)\s", input_text, re.IGNORECASE)
-
-        if not match:
-            return None
-
-        self.model["trigger"] = match.group(1).lower()
-
-        return input_text[match.end() :].strip()
-
-    def _parse_input(self, user_prompt):
-
-        # Initialize parsed data structure
-        parsed_data = {
-            "flags": {"debug": None, "enhanced_prompt": None, "audit": None},
-            "params": {
-                "steps": None,
-                "size": None,
-                "distilled_cfg_scale": None,
-                "cfg_scale": None,
-                "sampler_name": None,
-                "scheduler": None,
-            },
-            "styles": [],
-            "subject": "",
-            "negative_prompt": "",
-        }
-
-        # --- 1. CLEAN TRIGGER (Immediate) ---
-        clean_prompt = re.sub(
-            r"^imgx?\s*", "", user_prompt.strip(), flags=re.IGNORECASE
-        )
-
-        # --- 2. SPLIT NEGATIVE PROMPT (Last occurrence on the right) ---
-        neg_pattern = r"(.*)\s*--\s*no\b\s*(.*)"
-        neg_match = re.search(neg_pattern, clean_prompt, re.IGNORECASE | re.DOTALL)
-
-        if neg_match:
-            main_part = neg_match.group(1).strip()
-            parsed_data["negative_prompt"] = neg_match.group(2).strip()
+        if self.model.trigger == "imgx":
+            await self._output_prompt()
         else:
-            main_part = clean_prompt
+            await self._generate_image(body)
+            await self._vision_audit()
+            await self._output_delivery()
 
-        # --- 3. SPLIT SUBJECT (Smart Separator) ---
-        if "--" in main_part:
-            # Explicit split for styles
-            prefix_part, subject_part = main_part.rsplit("--", 1)
-            parsed_data["subject"] = subject_part.strip()
-        else:
-            # Implicit split: find where parameters/flags end
-            last_technical_match = list(
-                re.finditer(r'(\b\w+=(?:".*?"|\S+))|([+-][dpa])', main_part)
+        self._dmp()
+        return self._suppress_output(body)
+
+    async def _create_model(
+        self,
+        __request__: Any,
+        __user__: Any,
+        body: dict,
+        user_prompt: str,
+    ):
+
+        if "features" in body:
+            body["features"] = {}
+            body["features"]["web_search"] = False
+
+        self.request = __request__
+        self.context = UserModel(**__user__)
+        self.performance_stats = []
+        self.cumulative_tokens = 0
+        self.cumulative_elapsed_time = 0.0
+        self.start_time = time.time()
+        self.model.id = body.get("model", "")
+
+        # Apply global settings to model
+        self._apply_global_settings(body)
+
+        # Apply valves settings to model
+        self._apply_valves_settings()
+
+        # Apply input overrides to model
+        self._apply_user_input(user_prompt)
+
+        await self._check_vision()
+        await self._detect_language()
+        await self._enhance_prompt()
+
+        if self.model.debug:
+            await self.emitter(
+                {
+                    "type": "message",
+                    "data": {
+                        "content": f"```\nModel: {json.dumps(self.model, indent=4)}\n```\n"
+                        f"```\nValves: {json.dumps(self.valves.model_dump(), indent=4)}\n```\n"
+                    },
+                }
             )
-            if last_technical_match:
-                split_pos = last_technical_match[-1].end()
-                prefix_part = main_part[:split_pos]
-                parsed_data["subject"] = main_part[split_pos:].strip()
-            else:
-                prefix_part = ""
-                parsed_data["subject"] = main_part.strip()
 
-        # --- 4. EXTRACT FLAGS ([+-][dpa]) ---
-        flags_found = re.findall(r"([+-][dpa])", prefix_part)
-        for flag in flags_found:
-            val = flag[0] == "+"
-            char = flag[1]
-            if char == "d":
-                parsed_data["flags"]["debug"] = val
-            elif char == "p":
-                parsed_data["flags"]["enhanced_prompt"] = val
-            elif char == "a":
-                parsed_data["flags"]["audit"] = val
-            prefix_part = prefix_part.replace(flag, "")
+        return
 
-        # --- 5. EXTRACT KV PARAMETERS ---
-        param_pattern = r'(\b\w+)=("(?:\\.|[^"\\])*"|\S+)'
-        params_found = re.findall(param_pattern, prefix_part)
-
-        for key, value in params_found:
-            clean_val = value.strip("\"'")
-            if key == "s":
-                parsed_data["params"]["steps"] = int(clean_val)
-            elif key == "sz":
-                parsed_data["params"]["size"] = (
-                    f"{clean_val}x{clean_val}" if "x" not in clean_val else clean_val
-                )
-            elif key == "dcs":
-                parsed_data["params"]["distilled_cfg_scale"] = float(clean_val)
-                parsed_data["params"]["cfg_scale"] = 1.0
-            elif key == "cs":
-                if parsed_data["params"]["cfg_scale"] is None:
-                    parsed_data["params"]["cfg_scale"] = float(clean_val)
-            elif key == "smp":
-                parsed_data["params"]["sampler_name"] = self._normalize_sampler(
-                    clean_val
-                )
-            elif key == "sch":
-                parsed_data["params"]["scheduler"] = self._normalize_scheduler(
-                    clean_val
-                )
-
-            prefix_part = prefix_part.replace(f"{key}={value}", "")
-
-        # --- 6. REMAINING PREFIX AS STYLES ---
-        if prefix_part.strip():
-            parsed_data["styles"] = [
-                s.strip() for s in prefix_part.split(",") if s.strip()
-            ]
-
-        # --- 7. APPLY VALVE OVERRIDES ---
-        # Note: Added logic for actual valve names based on your provided function
-        if parsed_data["flags"]["debug"] is not None:
-            self.model.debug = parsed_data["flags"]["debug"]
-        if parsed_data["flags"]["enhanced_prompt"] is not None:
-            self.model.enhanced_prompt = parsed_data["flags"]["enhanced_prompt"]
-        if parsed_data["flags"]["audit"] is not None:
-            self.model.quality_audit = parsed_data["flags"]["audit"]
-
-        if parsed_data["params"]["steps"]:
-            self.model.steps = parsed_data["params"]["steps"]
-        if parsed_data["params"]["size"]:
-            self.model.size = parsed_data["params"]["size"]
-        if parsed_data["params"]["distilled_cfg_scale"]:
-            self.model.distilled_cfg_scale = parsed_data["params"][
-                "distilled_cfg_scale"
-            ]
-        if parsed_data["params"]["cfg_scale"] is not None:
-            self.model.cfg_scale = parsed_data["params"]["cfg_scale"]
-        if parsed_data["params"]["sampler_name"]:
-            self.model.sampler_name = parsed_data["params"]["sampler_name"]
-        if parsed_data["params"]["scheduler"]:
-            self.model.scheduler = parsed_data["params"]["scheduler"]
-
-        # Update model state
-        self.model.user_prompt = parsed_data["subject"]
-        self.model.styles = parsed_data["styles"]
-        self.model.negative_prompt = parsed_data["negative_prompt"]
-
-        self.input = parsed_data
-
-    def _get_engine_settings(self, body):
+    def _apply_global_settings(self, body):
 
         conf = self.request.app.state.config
         state_dict = getattr(conf, "_state", {})
@@ -416,6 +232,107 @@ class Filter:
         self.model.update(common_settings)
         self.model.update(engine_settings)
         self.model.update(extra_params)
+
+    def _apply_valves_settings(self):
+        # Travaso dinamico: le Valves sovrascrivono i Global Settings.
+        # Escludiamo i None per permettere ai Global di sopravvivere se la Valve è vuota.
+        self.model.update(
+            {k: v for k, v in self.valves.model_dump().items() if v is not None}
+        )
+
+    def _apply_user_input(self, user_prompt):
+        # --- PHASE 1: NO HARDCODED DICT ---
+        # A questo punto self.model contiene già i Global Settings
+        # e (se chiamata prima) i valori delle Valves.
+
+        # Ci assicuriamo solo che i parametri essenziali abbiano un fallback
+        # estremo se mancano ovunque (Global/Valves/Prompt)
+        if "steps" not in self.model:
+            self.model["steps"] = 20
+        if "size" not in self.model:
+            self.model["size"] = "1024x1024"
+        if "seed" not in self.model:
+            self.model["seed"] = -1
+
+        # --- PHASE 2: PARSE PROMPT (Identica a prima) ---
+        clean_prompt = re.sub(
+            r"^imgx?\s*", "", user_prompt.strip(), flags=re.IGNORECASE
+        )
+
+        # Gestione Negative Prompt
+        negative_prompt = ""
+        if " --no " in clean_prompt.lower():
+            clean_prompt, negative_prompt = re.split(
+                r" --no ", clean_prompt, maxsplit=1, flags=re.IGNORECASE
+            )
+
+        # Gestione Prefix/Subject
+        if " -- " in clean_prompt:
+            prefix, subject = clean_prompt.split(" -- ", 1)
+        else:
+            tech_pattern = r'(\b\w+=(?:"[^"]*"|\S+))|([+-][dpa])'
+            matches = list(re.finditer(tech_pattern, clean_prompt))
+            split_idx = matches[-1].end() if matches else 0
+            prefix, subject = clean_prompt[:split_idx], clean_prompt[split_idx:].strip()
+
+        # --- PHASE 3: SURGICAL OVERRIDES ON SELF.MODEL ---
+        # Qui sovrascriviamo DIRETTAMENTE self.model.
+        # Se un parametro era nei Global Settings, ora viene aggiornato dal Prompt.
+        param_pattern = r'(\b\w+)=("([^"]*)"|(\S+))'
+        for k, _, q_val, u_val in re.findall(param_pattern, prefix):
+            val = q_val if q_val else u_val
+            try:
+                if k == "s":
+                    self.model["steps"] = int(val)
+                elif k == "sd":
+                    self.model["seed"] = int(val)
+                elif k == "sz":
+                    val = str(val).lower()
+                    if "x" in val:
+                        self.model["size"] = val
+                    else:
+                        self.model["size"] = f"{val}x{val}"
+                elif k == "n":
+                    self.model["n_iter"] = int(val)
+                elif k == "b":
+                    self.model["batch_size"] = int(val)
+                elif k == "cs":
+                    self.model["cfg_scale"] = float(val)
+                elif k == "dcs":
+                    self.model["distilled_cfg_scale"] = float(val)
+                    self.model["cfg_scale"] = 1.0  # Flux optimization
+
+                # High-Res Logic
+                elif k in ["hr", "hru", "hdcs", "dns"]:
+                    self.model["enable_hr"] = True
+                    if k == "hr":
+                        self.model["hr_scale"] = float(val)
+                    elif k == "hru":
+                        self.model["hr_upscaler"] = val
+                    elif k == "hdcs":
+                        self.model["hr_distilled_cfg"] = float(val)
+                    elif k == "dns":
+                        self.model["denoising_strength"] = float(val)
+            except ValueError:
+                continue
+
+        # Flag Overrides (+p, -d...)
+        for flag in re.findall(r"([+-][dpah])", prefix):
+            val = flag[0] == "+"
+            char = flag[1]
+            if char == "d":
+                self.model["debug"] = val
+            elif char == "p":
+                self.model["enhanced_prompt"] = val
+            elif char == "a":
+                self.model["quality_audit"] = val
+            elif char == "h":
+                self.model["enable_hr"] = val
+
+        # --- PHASE 4: FINAL COMMIT ---
+        self.model.update(
+            {"user_prompt": subject.strip(), "negative_prompt": negative_prompt.strip()}
+        )
 
     async def _check_vision(self):
 
@@ -565,8 +482,6 @@ class Filter:
 
     async def _enhance_prompt(self):
 
-        # self.model.enhanced_prompt = self.model.user_prompt
-
         if self.model.enhanced_prompt or self.model.trigger == "imgx":
             self._dbg("Starting Prompt Enhancing...")
             start_timestamp = time.time()
@@ -627,41 +542,81 @@ class Filter:
                     }
                 )
 
-            self.model.enhanced_prompt = re.sub(r"['\"]", "", enhanced_prompt)
+        else:
+            enhanced_prompt = self.model.user_prompt
 
-        return
+        self.model.enhanced_prompt = re.sub(r"['\"]", "", enhanced_prompt)
 
+    def _sanitize_payload(self) -> dict:
+
+        # 1. Copia il modello
+        payload = self.model.copy()
+
+        # 2. Rimuovi ESATTAMENTE quello che serve solo a Easymage/OWUI
+        internal_keys = [
+            "trigger",  # Interno Easymage
+            "id",  # ID del modello LLM
+            "engine",  # Nome del backend
+            "base_url",  # URL del server Forge
+            "size",  # Sostituito da width/height
+            "user_prompt",  # Usiamo 'prompt' per Forge
+            "enhanced_prompt",  # Prompt già processato
+            "quality_audit",  # Flag interno
+            "persistent_vision_cache",  # Cache interna
+            "debug",  # Flag interno
+            "vision",  # Flag interno
+            "language",  # Metadato lingua
+            "b64_data",
+            "model",
+        ]
+
+        for key in internal_keys:
+            payload.pop(key, None)
+
+        # 3. Trasferimento Prompt e Dimensioni
+        payload["prompt"] = self.model.get("enhanced_prompt", "")
+
+        if "size" in self.model:
+            try:
+                w, h = map(int, self.model["size"].split("x"))
+                payload["width"] = w
+                payload["height"] = h
+            except Exception:
+                payload["width"], payload["height"] = 1024, 1024  # Default sano
+
+        # Nel punto dove prepari il payload per Forge
+        if payload.get("enable_hr"):
+            # Fix per l'errore 500: Forge vuole una lista, non None
+            payload["hr_additional_modules"] = []
+
+            # Sicurezza: se l'upscaler è nullo, Forge dà 500
+            if not payload.get("hr_upscaler"):
+                payload["hr_upscaler"] = "Latent"
+
+        return payload
 
     async def _generate_image(self, body):
+
         image_gen_start = time.time()
+
         # Detect current engine
         engine = self.request.app.state.config.IMAGE_GENERATION_ENGINE
-        
+
         try:
             if engine in ["automatic1111", ""]:
                 self._dbg("Using Forge Direct Bypass (Force params)...")
-                
+
                 # --- PAYLOAD FORGE ---
-                payload = {
-                    "prompt": self.model.enhanced_prompt,
-                    "negative_prompt": self.model.negative_prompt,
-                    "batch_size": 1,
-                    "steps": self.model.steps if self.model.steps else 30,
-                    "cfg_scale": 1,
-                    "distilled_cfg_scale": 3,
-                    "sampler_name": self.model.sampler_name if self.model.sampler_name else "Euler",
-                    "scheduler": self.model.scheduler if self.model.scheduler else "Simple",
-                }
-                if self.model.size:
-                    try:
-                        w, h = map(int, self.model.size.split("x"))
-                        payload["width"], payload["height"] = w, h
-                    except: pass
+                payload = self._sanitize_payload()
+
+                self._dmp(payload)
 
                 # --- CALL FORGE ---
-                base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL.rstrip('/')
+                base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL.rstrip(
+                    "/"
+                )
                 api_url = f"{base_url}/sdapi/v1/txt2img"
-                
+
                 headers = {}
                 api_auth = self.request.app.state.config.AUTOMATIC1111_API_AUTH
                 if api_auth:
@@ -672,16 +627,22 @@ class Filter:
                         headers["Authorization"] = f"Bearer {api_auth}"
 
                 import httpx
+
                 async with httpx.AsyncClient() as client:
-                    r = await client.post(api_url, json=payload, headers=headers, timeout=None)
+                    r = await client.post(
+                        api_url, json=payload, headers=headers, timeout=None
+                    )
                     r.raise_for_status()
                     res = r.json()
+
+                self._dmp(res["parameters"])
 
                 # --- PROCESS FORGE RESPONSE ---
                 if "images" in res and res["images"]:
                     img_b64 = res["images"][0]
-                    if "," in img_b64: img_b64 = img_b64.split(",")[1]
-                    
+                    if "," in img_b64:
+                        img_b64 = img_b64.split(",")[1]
+
                     # Store for Vision Audit
                     self.model.b64_data = img_b64
                     self.model.image_url = f"data:image/png;base64,{img_b64}"
@@ -695,35 +656,34 @@ class Filter:
                     prompt=self.model.enhanced_prompt,
                     n=1,
                     size=self.model.size,
-                    model=self.model.model
+                    model=self.model.model,
                 )
-                
+
                 gen_res = await image_generations(
                     request=self.request,
                     form_data=form_data,
                     user=self.context,
                 )
-                
+
                 if gen_res and len(gen_res) > 0:
                     self.model.image_url = gen_res[0]["url"]
                     # For standard engine, we don't have b64_data in memory
-                    if hasattr(self.model, 'b64_data'): del self.model.b64_data
+                    if hasattr(self.model, "b64_data"):
+                        del self.model.b64_data
                 else:
                     raise Exception("Standard image generation failed")
 
             # Finalize
             self.image_gen_time_int = int(time.time() - image_gen_start)
-            await self.emitter({
-                "type": "message",
-                "data": {"content": f"![Generated Image]({self.model.image_url})"}
-            })
+            await self.emitter(
+                {
+                    "type": "message",
+                    "data": {"content": f"![Generated Image]({self.model.image_url})"},
+                }
+            )
 
         except Exception as e:
             await self._err(f"Image Generation failed ({engine}): {e}")
-
-
-
-
 
     async def _vision_audit(self):
         audit_results = {"score": None, "critique": None, "emoji": "⚪"}
@@ -732,14 +692,16 @@ class Filter:
             return audit_results
 
         self._dbg("Starting Vision Quality Audit...")
-        await self.emitter({
-            "type": "status",
-            "data": {"description": "Visual Quality Audit...", "done": False},
-        })
+        await self.emitter(
+            {
+                "type": "status",
+                "data": {"description": "Visual Quality Audit...", "done": False},
+            }
+        )
         audit_start = time.time()
         try:
             # --- HYBRID IMAGE LOADING ---
-            if hasattr(self.model, 'b64_data') and self.model.b64_data:
+            if hasattr(self.model, "b64_data") and self.model.b64_data:
                 self._dbg("Audit: Using image from memory (Base64)")
                 image_url_for_vision = f"data:image/png;base64,{self.model.b64_data}"
             else:
@@ -747,7 +709,7 @@ class Filter:
                 image_url_for_vision = self.model.image_url
             # -----------------------------
 
-            audit_instruction=f"""
+            audit_instruction = f"""
                 RESET: ######################################### NEW DATA STREAM - NO PREVIOUS CONTEXT ACCESSIBLE ###########################################            
                             
                 ENVIRONMENT: IGNORE ALL PRIOR CONTEXT. NEURAL CACHE RESET. STARTING FROM ZERO-STATE.
@@ -780,8 +742,7 @@ class Filter:
 
                 SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
             """
-            
-            
+
             vision_res = await generate_chat_completion(
                 request=self.request,
                 form_data={
@@ -909,49 +870,6 @@ class Filter:
             {"type": "status", "data": {"description": summary, "done": True}}
         )
 
-    async def _create_model(
-        self,
-        __request__: Any,
-        __user__: Any,
-        body: dict,
-        user_prompt: str,
-    ):
-
-        if "features" in body:
-            body["features"] = {}
-            body["features"]["web_search"] = False
-
-        self.request = __request__
-        self.context = UserModel(**__user__)
-        self.performance_stats = []
-        self.cumulative_tokens = 0
-        self.cumulative_elapsed_time = 0.0
-        self.start_time = time.time()
-        self.model.id = body.get("model", "")
-        self._get_engine_settings(body)
-        self.model.update(
-            {k: v for k, v in self.valves.model_dump().items() if v is not None}
-        )
-        self._parse_input(user_prompt)
-
-        await self._check_vision()
-        await self._detect_language()
-        await self._enhance_prompt()
-
-        if self.valves.debug:
-            await self.emitter(
-                {
-                    "type": "message",
-                    "data": {
-                        "content": f"```\nModel: {json.dumps(self.model, indent=4)}\n```\n"
-                        f"```\nValves: {json.dumps(self.valves.model_dump(), indent=4)}\n```\n"
-                        f"```\nInput: {json.dumps(self.input, indent=4)}\n```\n"
-                    },
-                }
-            )
-
-        return
-
     async def _output_prompt(self):
 
         # 1. Emit the enhanced prompt as a message
@@ -980,7 +898,7 @@ class Filter:
             {"type": "status", "data": {"description": summary, "done": True}}
         )
 
-    def _dmp(self, data: Optional = None ):
+    def _dmp(self, data: Optional = None):
         if self.valves.debug:
             header = "—" * 80 + "\n📦 EASYMAGE DUMP:\n" + "—" * 80
             print(header, file=sys.stderr, flush=True)
@@ -1014,37 +932,130 @@ class Filter:
         self._dbg(str(e), True)
         if self.emitter:
             await self.emitter(
-                {"type": "message", "data": {"content": f"\n\n❌ EASYMAGE ERROR: {str(e)}\n"}}
+                {
+                    "type": "message",
+                    "data": {"content": f"\n\n❌ EASYMAGE ERROR: {str(e)}\n"},
+                }
             )
 
-    async def inlet(
-        self,
-        body: dict,
-        __user__: Optional[dict] = None,
-        __request__=None,
-        __event_emitter__=None,
-    ) -> dict:
+    def _register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
+        self.cumulative_tokens += token_count
+        self.cumulative_elapsed_time += elapsed
+        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
+        self.performance_stats.append(
+            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tokens_per_second:.1f} tk/s"
+        )
 
-        if not (user_prompt := self._check_input(body)):
-            return body
-        
-        self.emitter = __event_emitter__
-        try:
-            self._dbg(f"Started")
-            await self._create_model( __request__, __user__, body, user_prompt)
-            self._dbg(f"Raw user prompt: {self.model.user_prompt}")
+    def _unwrap(self, obj):
+        if hasattr(obj, "value"):
+            return self._unwrap(obj.value)
+        if isinstance(obj, dict):
+            return {k: self._unwrap(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._unwrap(i) for i in obj]
+        return obj
 
-        except Exception as e:
-            await self._err(e)
-            
+    def _clean_key(self, key, engine):
+        k = key.upper()
+        k = (
+            k.replace("IMAGE_GENERATION_", "")
+            .replace("IMAGE_", "")
+            .replace("ENABLE_IMAGE_", "ENABLE_")
+        )
+        engine_prefix = f"{engine.upper()}_"
+        k = (
+            k.replace(f"{engine_prefix}API_", "")
+            .replace(engine_prefix, "")
+            .replace("IMAGES_", "")
+        )
+        return k.lower()
 
+    def _normalize_sampler(self, name):
+        n = (
+            name.lower()
+            .replace("_", "")
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("++", "")
+        )
 
-        if self.model.trigger == "imgx":
-            await self._output_prompt()
-        else:
-            await self._generate_image(body)
-            await self._vision_audit()
-            await self._output_delivery()
+        mapping = {
+            "d3s": "DPM++ 3M SDE",
+            "d2sh": "DPM++ 2M SDE Heun",
+            "d2s": "DPM++ 2M SDE",
+            "d2m": "DPM++ 2M",
+            "d2sa": "DPM++ 2S a",
+            "ds": "DPM++ SDE",
+            "ea": "Euler a",
+            "e": "Euler",
+            "l": "LMS",
+            "h": "Heun",
+            "d2": "DPM2",
+            "d2a": "DPM2 a",
+            "df": "DPM fast",
+            "dad": "DPM adaptive",
+            "r": "Restart",
+            "h2": "HeunPP2",
+            "ip": "IPNDM",
+            "ipv": "IPNDM_V",
+            "de": "DEIS",
+            "u": "UniPC",
+            "lcm": "LCM",
+            "di": "DDIM",
+            "dic": "DDIM CFG++",
+            "dp": "DDPM",
+        }
+        return mapping.get(n, name)
 
-        self._dmp()
-        return self._suppress_output(body)
+    def _normalize_scheduler(self, name):
+        n = name.lower().replace("_", "").replace(" ", "").replace("-", "")
+
+        mapping = {
+            "a": "Automatic",
+            "u": "Uniform",
+            "k": "Karras",
+            "e": "Exponential",
+            "pe": "Polyexponential",
+            "su": "SGM Uniform",
+            "ko": "KL Optimal",
+            "ays": "Align Your Steps",
+            "aysg": "Align Your Steps GITS",
+            "ays11": "Align Your Steps 11",
+            "ays32": "Align Your Steps 32",
+            "s": "Simple",
+            "n": "Normal",
+            "di": "DDIM",
+            "b": "Beta",
+            "t": "Turbo",
+        }
+        return mapping.get(n, name.capitalize())
+
+    def _check_input(self, body: dict) -> str | None:
+        if body.get("is_probe"):
+            return None
+
+        messages = body.get("messages", [])
+        if not messages:
+            return None
+
+        last_message_content = messages[-1]["content"]
+        input_text = (
+            last_message_content[0].get("text", "")
+            if isinstance(last_message_content, list)
+            else last_message_content
+        )
+
+        match = re.match(r"^(img|imgx)\s", input_text, re.IGNORECASE)
+
+        if not match:
+            return None
+
+        self.model["trigger"] = match.group(1).lower()
+
+        return input_text[match.end() :].strip()
+
+    def _suppress_output(self, body: dict) -> dict:
+        body["messages"] = [{"role": "assistant", "content": ""}]
+        body["max_tokens"] = 1
+        body["stop"] = [chr(i) for i in range(128)]
+        return body
