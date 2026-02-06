@@ -241,18 +241,11 @@ class Filter:
         )
 
     def _apply_user_input(self, user_prompt):
+
         # --- PHASE 1: NO HARDCODED DICT ---
         # A questo punto self.model contiene già i Global Settings
         # e (se chiamata prima) i valori delle Valves.
 
-        # Ci assicuriamo solo che i parametri essenziali abbiano un fallback
-        # estremo se mancano ovunque (Global/Valves/Prompt)
-        if "steps" not in self.model:
-            self.model["steps"] = 20
-        if "size" not in self.model:
-            self.model["size"] = "1024x1024"
-        if "seed" not in self.model:
-            self.model["seed"] = -1
 
         # --- PHASE 2: PARSE PROMPT (Identica a prima) ---
         clean_prompt = re.sub(
@@ -284,6 +277,10 @@ class Filter:
             try:
                 if k == "s":
                     self.model["steps"] = int(val)
+                elif k == "ge":
+                    mapping = {'a': 'automatic1111', 'o': 'openai', 'g': 'gemini'}
+                    self.model["engine"] = mapping.get(val)
+
                 elif k == "sd":
                     self.model["seed"] = int(val)
                 elif k == "sz":
