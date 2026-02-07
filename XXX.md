@@ -1,3 +1,4 @@
+
 # 🎨 Easymage: Command Syntax Guide
 
 Easymage intercetta i messaggi che iniziano con `img` o `imgx` e li processa attraverso un parser avanzato che separa flag, parametri tecnici, stili e prompt.
@@ -132,7 +133,7 @@ Struttura gerarchica dei parametri per chiamate dirette via `httpx` agli endpoin
     * **parameters** (Object)
         * `negativePrompt`: (string) Elementi da escludere (es: "blurry, low quality, distorted").
         * `sampleCount`: (int) Numero di immagini generate (1-4).
-        * `aspectRatio`: (string) Rapporto di forma richiesto. **UNICO VERO PARAMETRO IN PIU, GLI ALTRI SONO TUTTI RICONDUCIBILÎ**
+        * `aspectRatio`: (string) Rapporto di forma richiesto.
             * `1:1` (Quadrato)
             * `9:16` (Verticale)
             * `16:9` (Widescreen)
@@ -257,92 +258,60 @@ elif engine == "openai":
         # Salviamo nel modello per l'output finale
         self.model.b64_data = img_b64
         self.model.image_url = f"data:image/png;base64,{img_b64}"
+
 ```
 
-# Funzione per calcolo size per Forge, OpenAI e Gemini
+
+| Parametro EasyMage | Forge (A1111) | OpenAI (DALL-E 3) | Gemini (Imagen 3) | ComfyUI |
+| :--- | :--- | :--- | :--- | :--- |
+| **model** | `model` | `model` | `model` | `Checkpoints` Node |
+| **prompt** | `prompt` | `prompt` + `neg` | `prompt` | `CLIP Text Encode` |
+| **negative_prompt** | `negative_prompt` | ⚠️ **Iniettato nel Prompt** | `negativePrompt` | `Conditioning` Node |
+| **style** | ❌ N/A (via prompt) | ✅ `style` (vivid/natural) | ❌ N/A (via prompt) | `Style` Node / Lora |
+| **steps** | `steps` | ❌ N/A | ❌ N/A | `steps` |
+| **size** | `width`/`height` | `size` (mappato) | `aspectRatio` (mappato) | `Empty Latent` |
+| **seed** | `seed` | ❌ N/A | `seed` | `seed` |
+| **cfg_scale** | `cfg_scale` | ❌ N/A | ❌ N/A | `cfg` |
+| **distilled_cfg_scale**| `distilled_cfg` | ❌ N/A | ❌ N/A | `pag_scale` |
+| **sampler_name** | `sampler_name` | ❌ N/A | ❌ N/A | `sampler_name` |
+| **scheduler** | `scheduler` | ❌ N/A | ❌ N/A | `scheduler` |
+| **enable_hr** | `enable_hr` | ✅ `quality: hd` | ❌ N/A | `Upscale` Workflow |
+| **n_iter / batch** | `n_iter` / `batch` | ❌ N/A (1) | `sampleCount` (1-4) | `batch_size` |
+| **hr_scale** | `hr_scale` | ❌ N/A | ❌ N/A | `Scale Factor` |
+| **hr_upscaler** | `hr_upscaler` | ❌ N/A | ❌ N/A | `Upscale Model` |
+| **denoising_strength** | `denoising_strength` | ❌ N/A | ❌ N/A | `denoise` |
+
+---
+
+# Mapping Table
+
+| Categoria | Parametro Cmdline | Parametro EasyMage | Forge (A1111) | OpenAI (DALL-E 3) | Gemini (Imagen 3) | ComfyUI |
+| :--- | :---: | :--- | :--- | :--- | :--- | :--- |
+| **Engine** | `ge` | **engine** | `automatic1111/a` | `openai/o` | `gemini/g` | `comfyui/c`|
+| **Model** | `mdl` | **model** | `model` | `model` | `model` | `Checkpoints` Node |
+| **Core** | *(subject)* | **prompt** | `prompt` | `prompt` + `neg` | `prompt` | `CLIP Text Encode` |
+| **Core** | *(trigger)* | **negative_prompt** | `negative_prompt` | ⚠️ **Iniettato nel Prompt** | `negativePrompt` | `Conditioning` Node |
+| **Core** | `stl` | **style** | ❌ N/A (via prompt) | ✅ `style` (vivid/natural) | ❌ N/A (via prompt) | `Style` Node / Lora |
+| **Core** | `stp` | **steps** | `steps` | ❌ N/A | ❌ N/A | `steps` |
+| **Core** | `sz` | **size** | `width`/`height` | `size` (mappato) | `aspectRatio` (mappato) | `Empty Latent` |
+| **Core** | `sd` | **seed** | `seed` | ❌ N/A | `seed` | `seed` |
+| **Guidance** | `cs` | **cfg_scale** | `cfg_scale` | ❌ N/A | ❌ N/A | `cfg` |
+| **Guidance** | `dcs` | **distilled_cfg_scale** | `distilled_cfg` | ❌ N/A | ❌ N/A | `pag_scale` |
+| **Sampling** | `smp` | **sampler_name** | `sampler_name` | ❌ N/A | ❌ N/A | `sampler_name` |
+| **Sampling** | `sch` | **scheduler** | `scheduler` | ❌ N/A | ❌ N/A | `scheduler` |
+| **High-Res** | `+h` / `-h` | **enable_hr** | `enable_hr` | ✅ `quality: hd` | ❌ N/A | `Upscale` Workflow |
+| **Cloud** | `n` / `b` | **n_iter / batch** | `n_iter` / `batch` | ❌ N/A (1) | `sampleCount` (1-4) | `batch_size` |
+| **High-Res** | `hr` | **hr_scale** | `hr_scale` | ❌ N/A | ❌ N/A | `Scale Factor` |
+| **High-Res** | `hru` | **hr_upscaler** | `hr_upscaler` | ❌ N/A | ❌ N/A | `Upscale Model` |
+| **High-Res** | `hdcs` | **hr_distilled_cfg** | `hr_distilled_cfg` | ❌ N/A | ❌ N/A | Custom Node |
+| **High-Res** | `dns` | **denoising_strength** | `denoising_strength` | ❌ N/A | ❌ N/A | `denoise` |
+| **Debug** | `+d` / `-d` | **debug** | ✅ Internal Log | ❌ N/A | ❌ N/A | ✅ Internal Log |
+| **Audit** | `+a` / `-a` | **quality_audit** | ✅ Vision Post | ❌ N/A | ❌ N/A | ✅ Vision Post |
+| **Prompt** | `+p` / `-p` | **enhanced_prompt** | ✅ LLM Pre-proc | ✅ LLM Pre-proc | ✅ LLM Pre-proc | ✅ LLM Pre-proc |
 
 
-```python
-def _resolve_params(self, input_size: str, engine: str):
-    """
-    Normalizza le dimensioni e i parametri per i diversi motori.
-    Esegue il calcolo dei pixel per Forge e il mapping AR per Gemini/OpenAI.
-    """
-    # 1. Default fallback
-    base_w, base_h = 1024, 1024
-    ar_string = "1:1"
-
-    # 2. Parsing dell'input (accetta "1024x1024" o "16:9")
-    if "x" in input_size:
-        try:
-            parts = input_size.split("x")
-            base_w, base_h = int(parts[0]), int(parts[1])
-            # Calcolo approssimativo dell'AR per Gemini
-            ratio = base_w / base_h
-            if ratio > 1.7: ar_string = "16:9"
-            elif ratio > 1.3: ar_string = "4:3"
-            elif ratio < 0.6: ar_string = "9:16"
-            elif ratio < 0.8: ar_string = "3:4"
-            else: ar_string = "1:1"
-        except: pass
-    elif ":" in input_size:
-        ar_string = input_size
-        # Calcolo pixel per Forge basato su una base di 1024
-        mapping = {
-            "1:1": (1024, 1024),
-            "16:9": (1344, 768),
-            "9:16": (768, 1344),
-            "4:3": (1152, 864),
-            "3:4": (864, 1152)
-        }
-        base_w, base_h = mapping.get(ar_string, (1024, 1024))
-
-    # 3. Restituzione parametri specifici per motore
-    if engine == "gemini":
-    	base_url = config.IMAGES_GEMINI_API_BASE_URL
-	    api_key = config.IMAGES_GEMINI_API_KEY
-	    model_id = self.model.get("model") or "imagen-3.0-generate-001"
-	    # Endpoint Gemini (struttura Google)
-	    url = f"{base_url.rstrip('/')}/models/{model_id}:predict"
-        return {
-            "aspectRatio": ar_string,
-            "sampleCount": 1,
-            "negativePrompt": self.model.get("negative_prompt", ""),
-            "safetySetting": "block_none",
-            "addWatermark": False,
-            "personGeneration": "allow_all"
-        }
-    
-    elif engine == "forge":
-        return {
-            "width": base_w,
-            "height": base_h,
-            "seed": self.valves.FORGE_SEED if hasattr(self.valves, 'FORGE_SEED') else -1,
-            "negative_prompt": self.model.get("negative_prompt", "")
-        }
-
-    elif engine == "openai":
-
-		base_url = config.IMAGES_OPENAI_API_BASE_URL
-	    api_key = config.IMAGES_OPENAI_API_KEY
-	    # Endpoint specifico per le immagini
-	    url = f"{base_url.rstrip('/')}/images/generations"
-
-        # Mapping risoluzioni DALL-E 3 (le uniche 3 ammesse)
-        oa_size = "1024x1024"
-        if ar_string == "16:9": oa_size = "1792x1024"
-        elif ar_string == "9:16": oa_size = "1024x1792"
-        
-        # Mapping Quality basato su flag HR (High Resolution)
-        # Supponendo che 'hr' sia un booleano nel tuo modello
-        quality = "hd" if self.model.get("hr", False) else "standard"
-        
-        return {
-            "model": self.model.get("model") or "dall-e-3",
-            "prompt": self.model.enhanced_prompt,
-            "size": oa_size,
-            "quality": quality,
-            "style": "vivid", # Hardcoded per coerenza visiva
-            "response_format": "b64_json",
-            "user": str(self.request.app.state.config.USER_ID) # Esempio di ID utente
-        }
+**Models**: 
+*  a1111: `*.safetensors`
+* openai: `dall-e-3`,`dall-e-2`
+* gemini: `imagen-3.0-generate-001`,`imagen-3.0-fast-generate-001`
+* comfyui: uses the node id
