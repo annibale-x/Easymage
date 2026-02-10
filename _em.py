@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.6.15
+version: 0.7.2
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -15,13 +15,108 @@ import base64
 import os
 import sys
 import httpx  # type: ignore
-from typing import Optional, Any, List, Dict, Tuple
+from typing import Optional, Any, List, Dict, Tuple, Union
 from pydantic import BaseModel, Field
 from open_webui.routers.images import image_generations, CreateImageForm  # type: ignore
 from open_webui.models.users import UserModel  # type: ignore
 from open_webui.main import generate_chat_completion  # type: ignore
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
+
+# --- CONFIGURATION & MAPS ---
+
+
+class EasymageConfig:
+    """Static mappings for engine parameters and engines. Dictionaries are unalterable."""
+
+    SAMPLER_MAP = {
+        "d3s": "DPM++ 3M SDE",
+        "d2sh": "DPM++ 2M SDE Heun",
+        "d2s": "DPM++ 2M SDE",
+        "d2m": "DPM++ 2M",
+        "d2sa": "DPM++ 2S a",
+        "ds": "DPM++ SDE",
+        "ea": "Euler a",
+        "e": "Euler",
+        "l": "LMS",
+        "h": "Heun",
+        "d2": "DPM2",
+        "d2a": "DPM2 a",
+        "df": "DPM fast",
+        "dad": "DPM adaptive",
+        "r": "Restart",
+        "h2": "HeunPP2",
+        "ip": "IPNDM",
+        "ipv": "IPNDM_V",
+        "de": "DEIS",
+        "u": "UniPC",
+        "lcm": "LCM",
+        "di": "DDIM",
+        "dic": "DDIM CFG++",
+        "dp": "DDPM",
+    }
+
+    SCHEDULER_MAP = {
+        "a": "Automatic",
+        "u": "Uniform",
+        "k": "Karras",
+        "e": "Exponential",
+        "pe": "Polyexponential",
+        "su": "SGM Uniform",
+        "ko": "KL Optimal",
+        "ays": "Align Your Steps",
+        "aysg": "Align Your Steps GITS",
+        "ays11": "Align Your Steps 11",
+        "ays32": "Align Your Steps 32",
+        "s": "Simple",
+        "n": "Normal",
+        "di": "DDIM",
+        "b": "Beta",
+        "t": "Turbo",
+    }
+
+    ENGINE_MAP = {
+        "automatic1111": ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
+        "comfyui": ["COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"],
+        "openai": ["IMAGES_OPENAI_API_BASE_URL", "IMAGES_OPENAI_API_PARAMS"],
+        "gemini": ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
+    }
+
+    AUDIT_STANDARD = """
+        RESET: ####################### NEW DATA STREAM ##########################
+        ENVIRONMENT: STATELESS SANDBOX.
+        TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
+                Compare image with: '{prompt}',
+                Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+        TASK: TECHNICAL EVALUATION:
+                Evaluate NOISE, GRAIN, MELTING, JAGGIES.
+        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists.
+        MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+    """
+
+    AUDIT_STRICT = """
+        RESET: ####################### NEW DATA STREAM ##########################            
+        ENVIRONMENT: STATELESS SANDBOX.
+        RULE: Context Break. Terminate processing of previous context.
+        RULE: Clear your working memory buffer and analyze this input in total isolation.
+        TASK: AUDIT ANALYSIS (Audit scores is 0 to 100, where 0 is bad and 100 good):
+                Compare the image with the reference prompt: '{prompt}',
+                Describe what you actually see in the image.
+                Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
+                Identify any contradictions, missing elements, or hallucinations (like objects that shouldn4t be there).
+                Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+        RULE: Be extremely severe in technical evaluation. Do not excuse defects as limitations of resolution or scale.
+        TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
+                Perform a ruthless technical audit. Identify every visual flaw.
+                Evaluate NOISE as random pixel color variations.
+                Evaluate GRAIN as textural salt-and-pepper luminance noise.
+                Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
+                Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
+        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists. Be objective.
+        MANDATORY: Final response MUST end with a single line containing only the following metrics:
+        SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+    """
+
 
 # --- DATA STRUCTURES ---
 
@@ -33,7 +128,6 @@ class Store(dict):
         try:
             return self[item]
         except KeyError:
-            # Return None instead of raising AttributeError to prevent crashes on optional keys
             return None
 
     __setattr__ = dict.__setitem__
@@ -82,7 +176,21 @@ class EmitterService:
 
     async def emit_message(self, content: str):
         if self.emitter:
-            await self.emitter({"type": "message", "data": {"content": content}})
+            # Ensure \n after any code block closing
+            formatted_content = (
+                content.replace("```", "```\n") if content.endswith("```") else content
+            )
+            if "```" in content:
+                formatted_content = re.sub(
+                    r"(```[^\n]*\n.*?\n```)",
+                    r"\1\n",
+                    formatted_content,
+                    flags=re.DOTALL,
+                )
+
+            await self.emitter(
+                {"type": "message", "data": {"content": formatted_content}}
+            )
 
     async def emit_status(self, description: str, done: bool = False):
         if self.emitter:
@@ -105,7 +213,7 @@ class EmitterService:
 
 
 class InferenceEngine:
-    """Handles all LLM interactions (Text and Vision) using a generalized method."""
+    """Handles all LLM interactions with generalized expansion for Text and Vision."""
 
     def __init__(self, request, user, state: EasymageState, emitter: EmitterService):
         self.request = request
@@ -113,12 +221,33 @@ class InferenceEngine:
         self.state = state
         self.emitter = emitter
 
-    async def _infer(self, task: Optional[str], messages: List[Dict]) -> str:
-        """Generalized inference method for all LLM calls (replaces direct generate_chat_completion)."""
+    async def _infer(self, task: Optional[str], data: Dict[str, Any]) -> str:
+        """Generalized inference. Expands 'data' dictionary into standard message roles."""
         start_time = time.time()
         if task:
             await self.emitter.emit_status(f"{task}..")
 
+        # 1. Message Construction Logic
+        messages = []
+        if sys_content := data.get("system"):
+            messages.append({"role": "system", "content": sys_content})
+
+        user_raw = data.get("user")
+        if isinstance(user_raw, dict):
+            # Vision / Multi-content handling
+            content_list = []
+            if img_url := user_raw.get("image_url"):
+                content_list.append(
+                    {"type": "image_url", "image_url": {"url": img_url}}
+                )
+            if text_content := user_raw.get("text"):
+                content_list.append({"type": "text", "text": text_content})
+            messages.append({"role": "user", "content": content_list})
+        else:
+            # Simple string handling
+            messages.append({"role": "user", "content": str(user_raw)})
+
+        # 2. Payload Preparation
         payload = {
             "model": self.state.model.id,
             "messages": messages,
@@ -128,11 +257,12 @@ class InferenceEngine:
             "is_probe": True,
         }
 
+        # 3. Request Execution
         try:
             response = await generate_chat_completion(self.request, payload, self.user)
             if response:
                 content = response["choices"][0]["message"].get("content", "").strip()
-                # Clean reasoning tags
+                # Maintain internal logic: Clean thinking tags
                 content = re.sub(
                     r"<think>.*?</think>", "", content, flags=re.DOTALL
                 ).strip()
@@ -152,23 +282,19 @@ class InferenceEngine:
 
 
 class PromptParser:
-    """Handles prompt parsing, regex extraction and mappings."""
+    """Handles prompt parsing, regex extraction and parameter normalization."""
 
-    def __init__(self, sampler_map, scheduler_map):
-        self.sampler_map = sampler_map
-        self.scheduler_map = scheduler_map
+    def __init__(self, config: EasymageConfig):
+        self.config = config
 
     def parse_input(self, user_prompt: str, model_state: Store):
         clean_prompt = user_prompt
-
-        # 1. Negative Prompt
         negative_prompt = ""
         if " --no " in clean_prompt.lower():
             clean_prompt, negative_prompt = re.split(
                 r" --no ", clean_prompt, maxsplit=1, flags=re.IGNORECASE
             )
 
-        # 2. KV Params & Flags
         if " -- " in clean_prompt:
             prefix, subject = clean_prompt.split(" -- ", 1)
         else:
@@ -181,7 +307,6 @@ class PromptParser:
         remaining_styles = re.sub(tech_and_flags_pattern, "", prefix).strip()
         remaining_styles = re.sub(r"^[\s,]+|[\s,]+$", "", remaining_styles)
 
-        # 3. Parameter Mapping
         param_pattern = r'(\b\w+)=("([^"]*)"|(\S+))'
         for k, _, q_val, u_val in re.findall(param_pattern, prefix):
             k, val = k.lower(), (q_val if q_val else u_val).lower()
@@ -218,9 +343,13 @@ class PromptParser:
                 elif k == "sd":
                     model_state["seed"] = int(val)
                 elif k == "smp":
-                    model_state["sampler_name"] = self._normalize(val, self.sampler_map)
+                    model_state["sampler_name"] = self._normalize(
+                        val, self.config.SAMPLER_MAP
+                    )
                 elif k == "sch":
-                    model_state["scheduler"] = self._normalize(val, self.scheduler_map)
+                    model_state["scheduler"] = self._normalize(
+                        val, self.config.SCHEDULER_MAP
+                    )
                 elif k == "n":
                     model_state["n_iter"] = int(val)
                 elif k == "b":
@@ -271,7 +400,7 @@ class PromptParser:
             .replace("++", "")
         )
         return mapping.get(
-            n, name.capitalize() if mapping is self.scheduler_map else name
+            n, name.capitalize() if mapping is self.config.SCHEDULER_MAP else name
         )
 
 
@@ -285,6 +414,10 @@ class Filter:
         )
         quality_audit: bool = Field(
             default=True, description="Post-generation Image Quality Audit."
+        )
+        strict_audit: bool = Field(
+            default=False,
+            description="Enable ruthless technical evaluation (Strict Mode).",
         )
         persistent_vision_cache: bool = Field(
             default=False, description="Saves vision probe results to disk."
@@ -308,59 +441,9 @@ class Filter:
         hr_distilled_cfg: float = 3.5
         denoising_strength: float = 0.45
 
-    _SAMPLER_MAP = {
-        "d3s": "DPM++ 3M SDE",
-        "d2sh": "DPM++ 2M SDE Heun",
-        "d2s": "DPM++ 2M SDE",
-        "d2m": "DPM++ 2M",
-        "d2sa": "DPM++ 2S a",
-        "ds": "DPM++ SDE",
-        "ea": "Euler a",
-        "e": "Euler",
-        "l": "LMS",
-        "h": "Heun",
-        "d2": "DPM2",
-        "d2a": "DPM2 a",
-        "df": "DPM fast",
-        "dad": "DPM adaptive",
-        "r": "Restart",
-        "h2": "HeunPP2",
-        "ip": "IPNDM",
-        "ipv": "IPNDM_V",
-        "de": "DEIS",
-        "u": "UniPC",
-        "lcm": "LCM",
-        "di": "DDIM",
-        "dic": "DDIM CFG++",
-        "dp": "DDPM",
-    }
-    _SCHEDULER_MAP = {
-        "a": "Automatic",
-        "u": "Uniform",
-        "k": "Karras",
-        "e": "Exponential",
-        "pe": "Polyexponential",
-        "su": "SGM Uniform",
-        "ko": "KL Optimal",
-        "ays": "Align Your Steps",
-        "aysg": "Align Your Steps GITS",
-        "ays11": "Align Your Steps 11",
-        "ays32": "Align Your Steps 32",
-        "s": "Simple",
-        "n": "Normal",
-        "di": "DDIM",
-        "b": "Beta",
-        "t": "Turbo",
-    }
-    _ENGINE_MAP = {
-        "automatic1111": ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
-        "comfyui": ["COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"],
-        "openai": ["IMAGES_OPENAI_API_BASE_URL", "IMAGES_OPENAI_API_PARAMS"],
-        "gemini": ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
-    }
-
     def __init__(self):
         self.valves = self.Valves()
+        self.config = EasymageConfig()
 
     async def inlet(
         self,
@@ -369,25 +452,32 @@ class Filter:
         __request__=None,
         __event_emitter__=None,
     ) -> dict:
-        # 1. Early check and extraction
         trigger_data = self._check_input(body)
         if not trigger_data:
             return body
 
         trigger, user_prompt_raw = trigger_data
 
-        # 2. Initialize SoC Components
+        # SoC Initialization
         self.st = EasymageState(self.valves)
         self.st.model.trigger = trigger
-
         self.em = EmitterService(__event_emitter__)
         self.request = __request__
         self.user = UserModel(**__user__)
         self.inf = InferenceEngine(self.request, self.user, self.st, self.em)
-        self.parser = PromptParser(self._SAMPLER_MAP, self._SCHEDULER_MAP)
+        self.parser = PromptParser(self.config)
 
         try:
             await self._setup_context(body, user_prompt_raw)
+
+            # Debug Emit in Chat
+            if self.st.model.debug:
+                await self.em.emit_message(
+                    f"```json\nDEBUG MODEL: {json.dumps(self.st.model, indent=2)}\n```\n"
+                )
+                await self.em.emit_message(
+                    f"```json\nDEBUG VALVES: {json.dumps(self.valves.model_dump(), indent=2)}\n```\n"
+                )
 
             if self.st.model.trigger == "imgx":
                 await self.em.emit_message(self.st.model.enhanced_prompt)
@@ -405,48 +495,37 @@ class Filter:
     async def _setup_context(self, body: dict, user_prompt: str):
         if "features" in body:
             body["features"]["web_search"] = False
-
-        # Base model info
         self.st.model.id = body.get("model", "")
-
-        # Load settings
         self._apply_global_settings()
         self.st.model.update(
             {k: v for k, v in self.valves.model_dump().items() if v is not None}
         )
-
-        # Parse user overrides
         self.parser.parse_input(user_prompt, self.st.model)
-
-        # Vision Capability Probe
         await self._check_vision_capability()
 
-        # Detect Language
+        # Language Detection - DO NOT ALTER INSTRUCTION
         detected_lang = await self.inf._infer(
             task="Language Detection",
-            messages=[{"role": "user", "content": self.st.model.user_prompt}],
+            data={
+                "user": self.st.model.user_prompt,
+                "system": "Return ONLY the language name of the user text.",
+            },
         )
         self.st.model.language = detected_lang if detected_lang else "English"
 
-        # Enhance Prompt
+        # Enhance Prompt - DO NOT ALTER INSTRUCTION
         if self.st.model.enhanced_prompt or self.st.model.trigger == "imgx":
             enhanced = await self.inf._infer(
                 task="Prompt Enhancing",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert AI Image Prompt Engineer. "
-                            f"Your task is to expand the user's input into a professional, highly detailed prompt in {self.st.model.language}. "
-                            "Add details about lighting, camera angle, textures, environment, and artistic style. "
-                            "Return ONLY the enhanced prompt text, no introductions."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Expand this prompt: {self.st.model.user_prompt}",
-                    },
-                ],
+                data={
+                    "system": (
+                        "You are an expert AI Image Prompt Engineer. "
+                        f"Your task is to expand the user's input into a professional, highly detailed prompt in {self.st.model.language}. "
+                        "Add details about lighting, camera angle, textures, environment, and artistic style. "
+                        "Return ONLY the enhanced prompt text, no introductions."
+                    ),
+                    "user": f"Expand this prompt: {self.st.model.user_prompt}",
+                },
             )
             self.st.model.enhanced_prompt = (
                 re.sub(r"['\"]", "", enhanced)
@@ -461,11 +540,9 @@ class Filter:
         self._validate_and_normalize()
 
     async def _check_vision_capability(self):
-        """Probe model for vision support."""
         if self.st.model.debug or not self.st.valves.persistent_vision_cache:
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
-
         if os.path.exists(CAPABILITY_CACHE_PATH):
             try:
                 with open(CAPABILITY_CACHE_PATH, "r") as f:
@@ -477,30 +554,23 @@ class Filter:
                 pass
 
         b64_pixels = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAS0lEQVQ4jWNkYGB4ycDAwMPAwMDEgAn+ERD7wQLVzIVFITGABZutJAEmBuxOJ8kAil0w8AZgiyr6umAYGDDEA5GFgYHhB5QmB/wAAIcLCBsQodqvAAAAAElFTkSuQmCC"
-        probe_msgs = [
-            {"role": "system", "content": "You must reply only 1 or 0"},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64_pixels}"},
-                    },
-                    {
-                        "type": "text",
-                        "text": "Analyze this image. If the image is completely black, reply with 1. Otherwise, reply with 0.",
-                    },
-                ],
-            },
-        ]
 
+        # Probe Prompt - DO NOT ALTER PROMPT
         res = await self.inf._infer(
-            task="Ensure Vision Capability", messages=probe_msgs
+            task="Ensure Vision Capability",
+            data={
+                "system": "You must reply only 1 or 0",
+                "user": {
+                    "image_url": f"data:image/png;base64,{b64_pixels}",
+                    "text": "Analyze this image. If the image is completely black, reply with 1. Otherwise, reply with 0. Reply 0 if you can't see the image.",
+                },
+            },
         )
         has_vision = "1" in res
-        self.st.model.vision = has_vision
-        self.st.vision_cache[self.st.model.id] = has_vision
-
+        self.st.model.vision, self.st.vision_cache[self.st.model.id] = (
+            has_vision,
+            has_vision,
+        )
         try:
             os.makedirs(os.path.dirname(CAPABILITY_CACHE_PATH), exist_ok=True)
             with open(CAPABILITY_CACHE_PATH, "w") as f:
@@ -509,10 +579,9 @@ class Filter:
             pass
 
     async def _generate_image(self):
-        image_gen_start = time.time()
+        start = time.time()
         engine = self.request.app.state.config.IMAGE_GENERATION_ENGINE
         await self.em.emit_status("Generating Image..")
-
         try:
             if engine in ["automatic1111", ""]:
                 payload = self._sanitize_payload()
@@ -522,12 +591,11 @@ class Filter:
                 headers = {}
                 api_auth = self.request.app.state.config.AUTOMATIC1111_API_AUTH
                 if api_auth:
-                    if ":" in api_auth:
-                        auth_b64 = base64.b64encode(api_auth.encode()).decode()
-                        headers["Authorization"] = f"Basic {auth_b64}"
-                    else:
-                        headers["Authorization"] = f"Bearer {api_auth}"
-
+                    headers["Authorization"] = (
+                        f"Basic {base64.b64encode(api_auth.encode()).decode()}"
+                        if ":" in api_auth
+                        else f"Bearer {api_auth}"
+                    )
                 async with httpx.AsyncClient() as client:
                     r = await client.post(
                         f"{base_url}/sdapi/v1/txt2img",
@@ -537,22 +605,23 @@ class Filter:
                     )
                     r.raise_for_status()
                     res = r.json()
-
                 img_b64 = res["images"][0].split(",")[-1]
-                self.st.model.b64_data = img_b64
-                self.st.model.image_url = f"data:image/png;base64,{img_b64}"
+                self.st.model.b64_data, self.st.model.image_url = (
+                    img_b64,
+                    f"data:image/png;base64,{img_b64}",
+                )
             else:
-                form_data = CreateImageForm(
+                form = CreateImageForm(
                     prompt=self.st.model.enhanced_prompt,
                     n=1,
                     size=self.st.model.size,
                     model=self.st.model.model,
                 )
-                gen_res = await image_generations(self.request, form_data, self.user)
-                if gen_res:
-                    self.st.model.image_url = gen_res[0]["url"]
+                gen = await image_generations(self.request, form, self.user)
+                if gen:
+                    self.st.model.image_url = gen[0]["url"]
 
-            self.st.image_gen_time_int = int(time.time() - image_gen_start)
+            self.st.image_gen_time_int = int(time.time() - start)
             await self.em.emit_message(f"![Generated Image]({self.st.model.image_url})")
         except Exception as e:
             await self._err(f"Image Gen Failed: {e}")
@@ -560,38 +629,33 @@ class Filter:
     async def _vision_audit(self):
         if not self.st.model.quality_audit or not self.st.model.vision:
             return
-
         img_url = (
             f"data:image/png;base64,{self.st.model.b64_data}"
             if self.st.model.b64_data
             else self.st.model.image_url
         )
 
-        audit_instruction = f"""
-            RESET: ######################################### NEW DATA STREAM ###########################################            
-            ENVIRONMENT: STATELESS SANDBOX.
-            TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
-                    Compare image with: '{self.st.model.enhanced_prompt}',
-                    Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
-            TASK: TECHNICAL EVALUATION:
-                    Evaluate NOISE, GRAIN, MELTING, JAGGIES.
-            MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists.
-            MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
-        """
+        # Audit Instruction
+        template = (
+            self.config.AUDIT_STRICT
+            if self.valves.strict_audit
+            else self.config.AUDIT_STANDARD
+        )
+
+        audit_instruction = template.format(
+            prompt=self.st.model.enhanced_prompt, lang=self.st.model.language
+        )
 
         raw_v_text = await self.inf._infer(
             task="Visual Quality Audit",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": audit_instruction},
-                        {"type": "image_url", "image_url": {"url": img_url}},
-                    ],
-                }
-            ],
+            data={
+                "system": audit_instruction,
+                "user": {
+                    "image_url": img_url,
+                    "text": "Analyze technical quality and prompt alignment. Return objective report and metrics.",
+                },
+            },
         )
-
         score_match = re.search(r"SCORE:\s*(\d+)", raw_v_text, re.IGNORECASE)
         if score_match:
             val = int(score_match.group(1))
@@ -616,7 +680,7 @@ class Filter:
             self.st.quality_audit_results["critique"] = raw_v_text
 
     async def _output_delivery(self):
-        total_time = int(time.time() - self.st.start_time)
+        total = int(time.time() - self.st.start_time)
         await self.em.emit_citation(
             "🚀 PROMPT", self.st.model.enhanced_prompt.replace("*", ""), "1", "p"
         )
@@ -624,7 +688,10 @@ class Filter:
         if self.st.model.quality_audit:
             if not self.st.model.vision:
                 await self.em.emit_citation(
-                    "‼️NO VISION", f"Model {self.st.model.id} lacks vision.", "2", "b"
+                    "‼️NO VISION",
+                    f"Model {self.st.model.id} lacks vision capabilities for audit.",
+                    "2",
+                    "b",
                 )
             elif self.st.quality_audit_results["critique"]:
                 await self.em.emit_citation(
@@ -635,12 +702,13 @@ class Filter:
                 )
 
         tech = (
-            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.st.model.id}\n → Engine: {self.st.model.engine}\n"
-            f" → Res: {self.st.model.size} | Steps: {self.st.model.get('steps')}\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲\n → Total: {total_time}s\n"
+            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.st.model.id}\n → Engine Model: {self.valves.model}\n"
+            f" → Resolution: {self.st.model.size} | Steps: {self.st.model.get('steps')}\n → Engine: {self.st.model.engine}\n"
+            f"\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲 𝗠𝗲𝘁𝗿𝗶𝗰𝘀\n → Total Time: {total}s\n → Image Gen: {self.st.image_gen_time_int}s\n"
             + "\n".join(self.st.performance_stats)
         )
-        await self.em.emit_citation("🔍 DETAILS", tech, "3", "d")
 
+        await self.em.emit_citation("🔍 DETAILS", tech, "3", "d")
         tps = (
             self.st.cumulative_tokens / self.st.cumulative_elapsed_time
             if self.st.cumulative_elapsed_time > 0
@@ -648,7 +716,7 @@ class Filter:
         )
         await self.em.emit_message("\n\n[1] [2] [3]")
         await self.em.emit_status(
-            f"{total_time}s total | {self.st.image_gen_time_int}s img | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s",
+            f"{total}s total | {self.st.image_gen_time_int}s img | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s",
             True,
         )
 
@@ -658,27 +726,24 @@ class Filter:
             if self.st.cumulative_elapsed_time > 0
             else 0
         )
-        summary = f"{int(time.time() - self.st.start_time)}s total | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s"
-        await self.em.emit_status(summary, True)
-
-    # --- HELPERS ---
+        await self.em.emit_status(
+            f"{int(time.time() - self.st.start_time)}s total | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s",
+            True,
+        )
 
     def _apply_global_settings(self):
         conf = self.request.app.state.config
         state_dict = getattr(conf, "_state", {})
-        engine = str(
+        eng = str(
             self._unwrap(state_dict.get("IMAGE_GENERATION_ENGINE", "none"))
         ).lower()
-
-        settings = {"engine": engine}
+        settings = {"engine": eng}
         for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
-            settings[self._clean_key(k, engine)] = self._unwrap(state_dict.get(k))
-
-        for k in self._ENGINE_MAP.get(engine, []):
+            settings[self._clean_key(k, eng)] = self._unwrap(state_dict.get(k))
+        for k in self.config.ENGINE_MAP.get(eng, []):
             val = self._unwrap(state_dict.get(k))
             if val is not None:
-                settings[self._clean_key(k, engine)] = val
-
+                settings[self._clean_key(k, eng)] = val
         self.st.model.update(settings)
 
     def _validate_and_normalize(self):
@@ -690,9 +755,9 @@ class Filter:
             self.st.model["model"] = "dall-e-3"
         elif eng == "gemini" and "imagen" not in mdl:
             self.st.model["model"] = "imagen-3.0-fast-generate-001"
-
-        sz = self.st.model.get("size", "1024x1024")
-        ar = self.st.model.get("aspect_ratio")
+        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
+            "aspect_ratio"
+        )
         try:
             w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
             ratio = (
@@ -702,7 +767,6 @@ class Filter:
             )
         except:
             w, h, ratio = 1024, 1024, 1.0
-
         if eng == "openai" or "dall-e" in mdl:
             if ratio > 1.2:
                 self.st.model["size"], self.st.model["aspect_ratio"] = (
@@ -720,8 +784,7 @@ class Filter:
                     "1:1",
                 )
         else:
-            h = (int(w / ratio) // 8) * 8
-            self.st.model["size"] = f"{w}x{h}"
+            self.st.model["size"] = f"{w}x{(int(w / ratio) // 8) * 8}"
 
     def _sanitize_payload(self) -> dict:
         p = self.st.model.copy()
@@ -779,6 +842,7 @@ class Filter:
         )
 
     def _suppress_output(self, body: dict) -> dict:
+        """Modify request body to suppress default generation output."""
         body["messages"] = [{"role": "assistant", "content": ""}]
         body["max_tokens"] = 1
         body["stop"] = [chr(i) for i in range(128)]
@@ -796,11 +860,7 @@ class Filter:
         if not self.valves.debug:
             return
         print(
-            "—" * 80
-            + "\n📦 EASYMAGE DUMP\n"
-            + json.dumps(self.st.model, indent=2)
-            + "\n"
-            + "—" * 80,
+            f"{'—'*40}\n📦 EASYMAGE DUMP\n{json.dumps(self.st.model, indent=2)}\n{'—'*40}",
             file=sys.stderr,
             flush=True,
         )

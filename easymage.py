@@ -55,6 +55,7 @@ class EasymageConfig:
         "dic": "DDIM CFG++",
         "dp": "DDPM",
     }
+
     SCHEDULER_MAP = {
         "a": "Automatic",
         "u": "Uniform",
@@ -73,12 +74,48 @@ class EasymageConfig:
         "b": "Beta",
         "t": "Turbo",
     }
+
     ENGINE_MAP = {
         "automatic1111": ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
         "comfyui": ["COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"],
         "openai": ["IMAGES_OPENAI_API_BASE_URL", "IMAGES_OPENAI_API_PARAMS"],
         "gemini": ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
     }
+
+    AUDIT_STANDARD = f"""
+            RESET: ####################### NEW DATA STREAM ##########################
+            ENVIRONMENT: STATELESS SANDBOX.
+            TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
+                    Compare image with: '{self.st.model.enhanced_prompt}',
+                    Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+            TASK: TECHNICAL EVALUATION:
+                    Evaluate NOISE, GRAIN, MELTING, JAGGIES.
+            MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists.
+            MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+        """
+
+    AUDIT_STRICT = f"""
+            RESET: ####################### NEW DATA STREAM ##########################            
+            ENVIRONMENT: STATELESS SANDBOX.
+            RULE: Context Break. Terminate processing of previous context.
+            RULE: Clear your working memory buffer and analyze this input in total isolation.
+            TASK: AUDIT ANALYSIS (Audit scores is 0 to 100, where 0 is bad and 100 good):
+                    Compare the image with the reference prompt: '{self.st.model.enhanced_prompt}',
+                    Describe what you actually see in the image.
+                    Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
+                    Identify any contradictions, missing elements, or hallucinations (like objects that shouldn4t be there).
+                    Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+            RULE: Be extremely severe in technical evaluation. Do not excuse defects as limitations of resolution or scale.
+            TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
+                    Perform a ruthless technical audit. Identify every visual flaw.
+                    Evaluate NOISE as random pixel color variations.
+                    Evaluate GRAIN as textural salt-and-pepper luminance noise.
+                    Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
+                    Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
+            MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists. Be objective.
+            MANDATORY: Final response MUST end with a single line containing only the following metrics:
+            SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+        """
 
 
 # --- DATA STRUCTURES ---
@@ -378,6 +415,10 @@ class Filter:
         quality_audit: bool = Field(
             default=True, description="Post-generation Image Quality Audit."
         )
+        strict_audit: bool = Field(
+            default=False, 
+            description="Enable ruthless technical evaluation (Strict Mode)."
+        )
         persistent_vision_cache: bool = Field(
             default=False, description="Saves vision probe results to disk."
         )
@@ -595,41 +636,10 @@ class Filter:
         )
 
         # Audit Instruction
-
-        # audit_instruction = f"""
-        #     RESET: ######################################### NEW DATA STREAM ###########################################
-        #     ENVIRONMENT: STATELESS SANDBOX.
-        #     TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
-        #             Compare image with: '{self.st.model.enhanced_prompt}',
-        #             Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
-        #     TASK: TECHNICAL EVALUATION:
-        #             Evaluate NOISE, GRAIN, MELTING, JAGGIES.
-        #     MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists.
-        #     MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
-        # """
-
-        audit_instruction = f"""
-                RESET: ######################################### NEW DATA STREAM ###########################################            
-                ENVIRONMENT: STATELESS SANDBOX.
-                RULE: Context Break. Terminate processing of previous context.
-                RULE: Clear your working memory buffer and analyze this input in total isolation.
-                TASK: AUDIT ANALYSIS (Audit scores is 0 to 100, where 0 is bad and 100 good):
-                        Compare the image with the reference prompt: '{self.st.model.enhanced_prompt}',
-                        Describe what you actually see in the image.
-                        Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
-                        Identify any contradictions, missing elements, or hallucinations (like objects that shouldn4t be there).
-                        Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
-                RULE: Be extremely severe in technical evaluation. Do not excuse defects as limitations of resolution or scale.
-                TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
-                        Perform a ruthless technical audit. Identify every visual flaw.
-                        Evaluate NOISE as random pixel color variations.
-                        Evaluate GRAIN as textural salt-and-pepper luminance noise.
-                        Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
-                        Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
-                MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists. Be objective.
-                MANDATORY: Final response MUST end with a single line containing only the following metrics:
-                SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
-            """
+        instruction = (
+            self.config.AUDIT_STRICT if self.valves.strict_audit 
+            else self.config.AUDIT_STANDARD
+        )
 
         raw_v_text = await self.inf._infer(
             task="Visual Quality Audit",
