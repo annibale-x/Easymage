@@ -1,11 +1,11 @@
 """
-Title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-Version: 0.6.13
-Repository: https://github.com/annibale-x/Easymage
-Author: Hannibal
-Author_url: https://openwebui.com/u/h4nn1b4l
-Author_email: annibale.x@gmail.com
-Description: Image generation filter for Open WebUI.
+title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
+version: 0.6.15
+repo_url: https://github.com/annibale-x/Easymage
+author: Hannibal
+author_url: https://openwebui.com/u/h4nn1b4l
+author_email: annibale.x@gmail.com
+Description: Image generation filter and prompt enhancer for Open WebUI.
 """
 
 import json
@@ -14,247 +14,165 @@ import time
 import base64
 import os
 import sys
-import requests
-from typing import Optional, Any, Callable
+import httpx  # type: ignore
+from typing import Optional, Any, List, Dict, Tuple
 from pydantic import BaseModel, Field
-from open_webui.routers.images import image_generations, CreateImageForm
-from open_webui.models.users import UserModel
-from open_webui.models.files import Files
-from open_webui.main import generate_chat_completion
+from open_webui.routers.images import image_generations, CreateImageForm  # type: ignore
+from open_webui.models.users import UserModel  # type: ignore
+from open_webui.main import generate_chat_completion  # type: ignore
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
+# --- DATA STRUCTURES ---
+
 
 class Store(dict):
+    """Dynamic dictionary storage with dot notation access."""
+
     def __getattr__(self, item):
         try:
             return self[item]
         except KeyError:
-            raise AttributeError(f"Store has no attribute '{item}'")
+            # Return None instead of raising AttributeError to prevent crashes on optional keys
+            return None
 
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
 
-class Filter:
-    class Valves(BaseModel):
+class EasymageState:
+    """Manages the internal state and configuration of a single request."""
 
-        # --- Base settings ---
-
-        enhanced_prompt: bool = Field(
-            default=True, description="Enrich prompt details."
+    def __init__(self, valves):
+        self.model = Store(
+            {
+                "trigger": None,
+                "debug": valves.debug,
+                "enhanced_prompt": valves.enhanced_prompt,
+                "quality_audit": valves.quality_audit,
+                "persistent_vision_cache": valves.persistent_vision_cache,
+            }
         )
-
-        quality_audit: bool = Field(
-            default=True, description="Post-generation Image Quality Audit."
-        )
-
-        # --- Advanced settings ---
-
-        # unload_other_models: bool = Field(
-        #     default=False,
-        #     description="Unload all models from VRAM except the current one.",
-        # )
-
-        persistent_vision_cache: bool = Field(
-            default=False,
-            description="Saves vision probe results to disk to avoid re-testing",
-        )
-
-        debug: bool = Field(
-            default=False,
-            description="Enable debug mode to print logs to the Docker console.",
-        )
-
-        # --- Global Engine Settings ---
-
-        model: Optional[str] = Field(
-            default=None,
-            description="Force generation model.",
-        )
-
-        steps: int = 20
-        size: str = "1024x1024"
-
-        # --- Advanced Engine Settings
-
-        seed: int = -1
-        cfg_scale: float = 1.0
-        distilled_cfg_scale: float = 3.5
-        sampler_name: str = "Euler"
-        scheduler: str = "Simple"
-
-        # --- Advanced Engine Settings (High-Res and Batching)
-        enable_hr: bool = False
-        n_iter: int = 1
-        batch_size: int = 1
-        hr_scale: float = 2.0
-        hr_upscaler: str = "Latent"
-        hr_distilled_cfg: float = 3.5
-        denoising_strength: float = 0.45
-
-    def __init__(self):
-
-        self.model = Store({})
-        self.input = Store({})
-        self.engine = Store({})
-        self.valves = self.Valves()
-        self.performance_stats = []
-        self.vision_cache = {}
-        self.cumulative_tokens = 0
-        self.cumulative_elapsed_time = 0.0
-
-    async def inlet(
-        self,
-        body: dict,
-        __user__: Optional[dict] = None,
-        __request__=None,
-        __event_emitter__=None,
-    ) -> dict:
-
-        if not (user_prompt := self._check_input(body)):
-            return body
-
-        self.emitter = __event_emitter__
-        try:
-            self._dbg(f"Started")
-            await self._create_model(__request__, __user__, body, user_prompt)
-            self._dbg(f"Raw user prompt: {self.model.user_prompt}")
-
-        except Exception as e:
-            await self._err(e)
-
-        if self.model.trigger == "imgx":
-            await self._output_prompt()
-        else:
-            await self._generate_image(body)
-            await self._vision_audit()
-            await self._output_delivery()
-
-        self._dmp()
-        return self._suppress_output(body)
-
-    async def _create_model(
-        self,
-        __request__: Any,
-        __user__: Any,
-        body: dict,
-        user_prompt: str,
-    ):
-
-        if "features" in body:
-            body["features"] = {}
-            body["features"]["web_search"] = False
-
-        self.request = __request__
-        self.context = UserModel(**__user__)
+        self.valves = valves
         self.performance_stats = []
         self.cumulative_tokens = 0
         self.cumulative_elapsed_time = 0.0
         self.start_time = time.time()
-        self.model.id = body.get("model", "")
+        self.image_gen_time_int = 0
+        self.quality_audit_results = {"score": None, "critique": None, "emoji": "⚪"}
+        self.vision_cache = {}
 
-        # Apply global settings to model
-        self._apply_global_settings(body)
+    def register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
+        self.cumulative_tokens += token_count
+        self.cumulative_elapsed_time += elapsed
+        tps = token_count / elapsed if elapsed > 0 else 0
+        self.performance_stats.append(
+            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tps:.1f} tk/s"
+        )
 
-        # Apply valves settings to model
-        self._apply_valves_settings()
 
-        # Apply input overrides to model
-        self._apply_user_input(user_prompt)
+# --- SERVICES ---
 
-        await self._check_vision()
-        await self._detect_language()
-        await self._enhance_prompt()
 
-        if self.model.debug:
+class EmitterService:
+    """Handles communication with the Open WebUI event emitter."""
+
+    def __init__(self, event_emitter):
+        self.emitter = event_emitter
+
+    async def emit_message(self, content: str):
+        if self.emitter:
+            await self.emitter({"type": "message", "data": {"content": content}})
+
+    async def emit_status(self, description: str, done: bool = False):
+        if self.emitter:
+            await self.emitter(
+                {"type": "status", "data": {"description": description, "done": done}}
+            )
+
+    async def emit_citation(self, name: str, document: str, source: str, cid: str):
+        if self.emitter:
             await self.emitter(
                 {
-                    "type": "message",
+                    "type": "citation",
                     "data": {
-                        "content": f"```\nModel: {json.dumps(self.model, indent=4)}\n```\n"
-                        f"```\nValves: {json.dumps(self.valves.model_dump(), indent=4)}\n```\n"
+                        "source": {"name": name},
+                        "document": [document],
+                        "metadata": [{"source": source, "id": cid}],
                     },
                 }
             )
 
-        return
 
-    def _apply_global_settings(self, body):
+class InferenceEngine:
+    """Handles all LLM interactions (Text and Vision) using a generalized method."""
 
-        conf = self.request.app.state.config
-        state_dict = getattr(conf, "_state", {})
+    def __init__(self, request, user, state: EasymageState, emitter: EmitterService):
+        self.request = request
+        self.user = user
+        self.state = state
+        self.emitter = emitter
 
-        active_engine = self._unwrap(
-            state_dict.get("IMAGE_GENERATION_ENGINE", "none")
-        ).lower()
+    async def _infer(self, task: Optional[str], messages: List[Dict]) -> str:
+        """Generalized inference method for all LLM calls (replaces direct generate_chat_completion)."""
+        start_time = time.time()
+        if task:
+            await self.emitter.emit_status(f"{task}..")
 
-        common_keys = [
-            "IMAGE_GENERATION_ENGINE",
-            "IMAGE_GENERATION_MODEL",
-            "IMAGE_SIZE",
-            "IMAGE_STEPS",
-        ]
-        engine_map = {
-            "automatic1111": ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
-            "comfyui": [
-                "COMFYUI_BASE_URL",
-                "COMFYUI_WORKFLOW",
-                "COMFYUI_WORKFLOW_NODES",
-            ],
-            "openai": ["IMAGES_OPENAI_API_BASE_URL", "IMAGES_OPENAI_API_PARAMS"],
-            "gemini": [
-                "IMAGES_GEMINI_API_BASE_URL",
-                "IMAGES_GEMINI_API_KEY",
-                "IMAGES_GEMINI_ENDPOINT_METHOD",
-            ],
+        payload = {
+            "model": self.state.model.id,
+            "messages": messages,
+            "stream": False,
+            "seed": 42,
+            "temperature": 0.0,
+            "is_probe": True,
         }
 
-        common_settings = {
-            self._clean_key(k, active_engine): self._unwrap(state_dict.get(k))
-            for k in common_keys
-        }
-        engine_settings = {}
+        try:
+            response = await generate_chat_completion(self.request, payload, self.user)
+            if response:
+                content = response["choices"][0]["message"].get("content", "").strip()
+                # Clean reasoning tags
+                content = re.sub(
+                    r"<think>.*?</think>", "", content, flags=re.DOTALL
+                ).strip()
+                content = re.sub(r"</?text>", "", content).strip()
 
-        if active_engine in engine_map:
-            for k in engine_map[active_engine]:
-                val = self._unwrap(state_dict.get(k))
-                if val is not None:
-                    engine_settings[self._clean_key(k, active_engine)] = val
+                if task:
+                    self.state.register_stat(
+                        task,
+                        time.time() - start_time,
+                        response.get("usage", {}).get("total_tokens", 0),
+                    )
+                return content.strip('"')
+            return ""
+        except Exception as e:
+            print(f"Inference Error ({task}): {e}", file=sys.stderr)
+            return ""
 
-        self.engine = {**common_settings, **engine_settings}
-        extra_params = (
-            engine_settings.pop("params", {})
-            if isinstance(engine_settings, dict)
-            else {}
-        )
-        self.model.update(common_settings)
-        self.model.update(engine_settings)
-        self.model.update(extra_params)
 
-    def _apply_valves_settings(self):
-        self.model.update(
-            {k: v for k, v in self.valves.model_dump().items() if v is not None}
-        )
+class PromptParser:
+    """Handles prompt parsing, regex extraction and mappings."""
 
-    def _apply_user_input(self, user_prompt):
+    def __init__(self, sampler_map, scheduler_map):
+        self.sampler_map = sampler_map
+        self.scheduler_map = scheduler_map
 
-        clean_prompt = re.sub(
-            r"^imgx?\s*", "", user_prompt.strip(), flags=re.IGNORECASE
-        )
+    def parse_input(self, user_prompt: str, model_state: Store):
+        clean_prompt = user_prompt
 
-        # --- PHASE 1: STRIP NEGATIVE PROMPT ---
+        # 1. Negative Prompt
         negative_prompt = ""
         if " --no " in clean_prompt.lower():
             clean_prompt, negative_prompt = re.split(
                 r" --no ", clean_prompt, maxsplit=1, flags=re.IGNORECASE
             )
 
-        # --- PHASE 2: STRIP KV PARAMS, FLAGS AND STYLES ---
+        # 2. KV Params & Flags
         if " -- " in clean_prompt:
             prefix, subject = clean_prompt.split(" -- ", 1)
         else:
-            tech_pattern = r'(\b\w+=(?:"[^"]*"|\S+))|([+-][dpa])'
+            tech_pattern = r'(\b\w+=(?:"[^"]*"|\S+))|([+-][dpah])'
             matches = list(re.finditer(tech_pattern, clean_prompt))
             split_idx = matches[-1].end() if matches else 0
             prefix, subject = clean_prompt[:split_idx], clean_prompt[split_idx:].strip()
@@ -263,109 +181,80 @@ class Filter:
         remaining_styles = re.sub(tech_and_flags_pattern, "", prefix).strip()
         remaining_styles = re.sub(r"^[\s,]+|[\s,]+$", "", remaining_styles)
 
-        # --- PHASE 3: OVERRIDES ON SELF.MODEL ---
+        # 3. Parameter Mapping
         param_pattern = r'(\b\w+)=("([^"]*)"|(\S+))'
         for k, _, q_val, u_val in re.findall(param_pattern, prefix):
-            k = k.lower()
-            val = (q_val if q_val else u_val).lower()
+            k, val = k.lower(), (q_val if q_val else u_val).lower()
             try:
-
                 if k == "ge":
-                    mapping = {
+                    model_state["engine"] = {
                         "a": "automatic1111",
                         "o": "openai",
                         "g": "gemini",
                         "c": "comfyui",
-                    }
-                    self.model["engine"] = mapping.get(val, val)
-
+                    }.get(val, val)
                 elif k == "mdl":
-                    model_mapping = {
+                    model_state["model"] = {
                         "d3": "dall-e-3",
                         "d2": "dall-e-2",
                         "i3": "imagen-3.0-generate-001",
                         "i3f": "imagen-3.0-fast-generate-001",
-                    }
-                    self.model["model"] = model_mapping.get(val, val)
-
+                    }.get(val, val)
                 elif k == "stp":
-                    self.model["steps"] = int(val)
-
+                    model_state["steps"] = int(val)
                 elif k == "sz":
-                    val = str(val)
-                    if "x" in val:
-                        self.model["size"] = val
-                    else:
-                        self.model["size"] = f"{val}x{val}"
+                    model_state["size"] = val if "x" in str(val) else f"{val}x{val}"
                 elif k == "ar":
-                    val = str(val)
-                    # Mappa delle scorciatoie
-                    ar_shortcuts = {
+                    model_state["aspect_ratio"] = {
                         "1": "1:1",
                         "16": "16:9",
                         "9": "9:16",
                         "4": "4:3",
                         "3": "3:4",
                         "21": "21:9",
-                    }
-                    self.model["aspect_ratio"] = ar_shortcuts.get(val, val)
-
+                    }.get(str(val), str(val))
                 elif k == "stl":
-                    stl_mapping = {"v": "vivid", "n": "natural"}
-                    self.model["style"] = stl_mapping.get(val, val)
-
+                    model_state["style"] = {"v": "vivid", "n": "natural"}.get(val, val)
                 elif k == "sd":
-                    self.model["seed"] = int(val)
-
+                    model_state["seed"] = int(val)
                 elif k == "smp":
-                    self.model["sampler_name"] = val
+                    model_state["sampler_name"] = self._normalize(val, self.sampler_map)
                 elif k == "sch":
-                    self.model["scheduler"] = val
-
+                    model_state["scheduler"] = self._normalize(val, self.scheduler_map)
                 elif k == "n":
-                    self.model["n_iter"] = int(val)
+                    model_state["n_iter"] = int(val)
                 elif k == "b":
-                    self.model["batch_size"] = int(val)
-
+                    model_state["batch_size"] = int(val)
                 elif k == "cs":
-                    self.model["cfg_scale"] = float(val)
+                    model_state["cfg_scale"] = float(val)
                 elif k == "dcs":
-                    self.model["distilled_cfg_scale"] = float(val)
-                    self.model["cfg_scale"] = 1.0  # Flux optimization
-
-                # High-Res Logic
+                    model_state["distilled_cfg_scale"] = float(val)
+                    model_state["cfg_scale"] = 1.0
                 elif k in ["hr", "hru", "hdcs", "dns"]:
-                    self.model["enable_hr"] = True
+                    model_state["enable_hr"] = True
                     if k == "hr":
-                        self.model["hr_scale"] = float(val)
+                        model_state["hr_scale"] = float(val)
                     elif k == "hru":
-                        self.model["hr_upscaler"] = val
+                        model_state["hr_upscaler"] = val
                     elif k == "hdcs":
-                        self.model["hr_distilled_cfg"] = float(val)
+                        model_state["hr_distilled_cfg"] = float(val)
                     elif k == "dns":
-                        self.model["denoising_strength"] = float(val)
-
+                        model_state["denoising_strength"] = float(val)
             except ValueError:
                 continue
 
-        # Flag Overrides (+p, -d...)
         for flag in re.findall(r"([+-][dpah])", prefix):
-            val = flag[0] == "+"
-            char = flag[1]
+            val, char = flag[0] == "+", flag[1]
             if char == "d":
-                self.model["debug"] = val
+                model_state["debug"] = val
             elif char == "p":
-                self.model["enhanced_prompt"] = val
+                model_state["enhanced_prompt"] = val
             elif char == "a":
-                self.model["quality_audit"] = val
+                model_state["quality_audit"] = val
             elif char == "h":
-                self.model["enable_hr"] = val
+                model_state["enable_hr"] = val
 
-        self._validate_model()
-        self._normalize_dimensions()
-
-        # --- PHASE 4: FINAL COMMIT ---
-        self.model.update(
+        model_state.update(
             {
                 "user_prompt": subject.strip(),
                 "negative_prompt": negative_prompt.strip(),
@@ -373,55 +262,223 @@ class Filter:
             }
         )
 
-    def _validate_model(self):
-        engine = self.model.get("engine")
-        model = str(self.model.get("model", "")).lower()
+    def _normalize(self, name, mapping):
+        n = (
+            name.lower()
+            .replace("_", "")
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("++", "")
+        )
+        return mapping.get(
+            n, name.capitalize() if mapping is self.scheduler_map else name
+        )
 
-        if engine == "openai":
-            if not any(m in model for m in ["dall-e-3", "dall-e-2"]):
-                self.model["model"] = "dall-e-3"  # Default D3
 
-        elif engine == "gemini":
-            if "imagen" not in model:
-                self.model["model"] = "imagen-3.0-fast-generate-001"  # Default I3-Fast
+# --- FILTER LOGIC ---
 
-    async def _check_vision(self):
 
-        self._dbg(f"Starting vision probe for: {self.model.id}")
+class Filter:
+    class Valves(BaseModel):
+        enhanced_prompt: bool = Field(
+            default=True, description="Enrich prompt details."
+        )
+        quality_audit: bool = Field(
+            default=True, description="Post-generation Image Quality Audit."
+        )
+        persistent_vision_cache: bool = Field(
+            default=False, description="Saves vision probe results to disk."
+        )
+        debug: bool = Field(default=False, description="Enable debug mode.")
+        model: Optional[str] = Field(
+            default=None, description="Force generation model."
+        )
+        steps: int = 20
+        size: str = "1024x1024"
+        seed: int = -1
+        cfg_scale: float = 1.0
+        distilled_cfg_scale: float = 3.5
+        sampler_name: str = "Euler"
+        scheduler: str = "Simple"
+        enable_hr: bool = False
+        n_iter: int = 1
+        batch_size: int = 1
+        hr_scale: float = 2.0
+        hr_upscaler: str = "Latent"
+        hr_distilled_cfg: float = 3.5
+        denoising_strength: float = 0.45
 
-        if self.model.debug or not self.model.persistent_vision_cache:
-            self.vision_cache.clear()
+    _SAMPLER_MAP = {
+        "d3s": "DPM++ 3M SDE",
+        "d2sh": "DPM++ 2M SDE Heun",
+        "d2s": "DPM++ 2M SDE",
+        "d2m": "DPM++ 2M",
+        "d2sa": "DPM++ 2S a",
+        "ds": "DPM++ SDE",
+        "ea": "Euler a",
+        "e": "Euler",
+        "l": "LMS",
+        "h": "Heun",
+        "d2": "DPM2",
+        "d2a": "DPM2 a",
+        "df": "DPM fast",
+        "dad": "DPM adaptive",
+        "r": "Restart",
+        "h2": "HeunPP2",
+        "ip": "IPNDM",
+        "ipv": "IPNDM_V",
+        "de": "DEIS",
+        "u": "UniPC",
+        "lcm": "LCM",
+        "di": "DDIM",
+        "dic": "DDIM CFG++",
+        "dp": "DDPM",
+    }
+    _SCHEDULER_MAP = {
+        "a": "Automatic",
+        "u": "Uniform",
+        "k": "Karras",
+        "e": "Exponential",
+        "pe": "Polyexponential",
+        "su": "SGM Uniform",
+        "ko": "KL Optimal",
+        "ays": "Align Your Steps",
+        "aysg": "Align Your Steps GITS",
+        "ays11": "Align Your Steps 11",
+        "ays32": "Align Your Steps 32",
+        "s": "Simple",
+        "n": "Normal",
+        "di": "DDIM",
+        "b": "Beta",
+        "t": "Turbo",
+    }
+    _ENGINE_MAP = {
+        "automatic1111": ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
+        "comfyui": ["COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"],
+        "openai": ["IMAGES_OPENAI_API_BASE_URL", "IMAGES_OPENAI_API_PARAMS"],
+        "gemini": ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
+    }
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    async def inlet(
+        self,
+        body: dict,
+        __user__: Optional[dict] = None,
+        __request__=None,
+        __event_emitter__=None,
+    ) -> dict:
+        # 1. Early check and extraction
+        trigger_data = self._check_input(body)
+        if not trigger_data:
+            return body
+
+        trigger, user_prompt_raw = trigger_data
+
+        # 2. Initialize SoC Components
+        self.st = EasymageState(self.valves)
+        self.st.model.trigger = trigger
+
+        self.em = EmitterService(__event_emitter__)
+        self.request = __request__
+        self.user = UserModel(**__user__)
+        self.inf = InferenceEngine(self.request, self.user, self.st, self.em)
+        self.parser = PromptParser(self._SAMPLER_MAP, self._SCHEDULER_MAP)
+
+        try:
+            await self._setup_context(body, user_prompt_raw)
+
+            if self.st.model.trigger == "imgx":
+                await self.em.emit_message(self.st.model.enhanced_prompt)
+                await self._output_status_only()
+            else:
+                await self._generate_image()
+                await self._vision_audit()
+                await self._output_delivery()
+        except Exception as e:
+            await self._err(e)
+
+        self._dmp()
+        return self._suppress_output(body)
+
+    async def _setup_context(self, body: dict, user_prompt: str):
+        if "features" in body:
+            body["features"]["web_search"] = False
+
+        # Base model info
+        self.st.model.id = body.get("model", "")
+
+        # Load settings
+        self._apply_global_settings()
+        self.st.model.update(
+            {k: v for k, v in self.valves.model_dump().items() if v is not None}
+        )
+
+        # Parse user overrides
+        self.parser.parse_input(user_prompt, self.st.model)
+
+        # Vision Capability Probe
+        await self._check_vision_capability()
+
+        # Detect Language
+        detected_lang = await self.inf._infer(
+            task="Language Detection",
+            messages=[{"role": "user", "content": self.st.model.user_prompt}],
+        )
+        self.st.model.language = detected_lang if detected_lang else "English"
+
+        # Enhance Prompt
+        if self.st.model.enhanced_prompt or self.st.model.trigger == "imgx":
+            enhanced = await self.inf._infer(
+                task="Prompt Enhancing",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert AI Image Prompt Engineer. "
+                            f"Your task is to expand the user's input into a professional, highly detailed prompt in {self.st.model.language}. "
+                            "Add details about lighting, camera angle, textures, environment, and artistic style. "
+                            "Return ONLY the enhanced prompt text, no introductions."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Expand this prompt: {self.st.model.user_prompt}",
+                    },
+                ],
+            )
+            self.st.model.enhanced_prompt = (
+                re.sub(r"['\"]", "", enhanced)
+                if enhanced
+                else self.st.model.user_prompt
+            )
+        else:
+            self.st.model.enhanced_prompt = re.sub(
+                r"['\"]", "", self.st.model.user_prompt
+            )
+
+        self._validate_and_normalize()
+
+    async def _check_vision_capability(self):
+        """Probe model for vision support."""
+        if self.st.model.debug or not self.st.valves.persistent_vision_cache:
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
-                self._dbg("Cache cleared.")
-
-        if self.model.id in self.vision_cache:
-            self._dbg(
-                f"Found in memory cache: {self.model.id} = {self.vision_cache[self.model.id]}"
-            )
-            return self.vision_cache[self.model.id]
 
         if os.path.exists(CAPABILITY_CACHE_PATH):
             try:
                 with open(CAPABILITY_CACHE_PATH, "r") as f:
-                    data = json.load(f)
-                    self.vision_cache.update(data)
-                    if self.model.id in self.vision_cache:
-                        self._dbg(
-                            f"Found on disk: {self.model.id} = {self.vision_cache[self.model.id]}"
-                        )
-                        return self.vision_cache[self.model.id]
-            except Exception as e:
-                await self._err(e)
+                    self.st.vision_cache = json.load(f)
+                    if self.st.model.id in self.st.vision_cache:
+                        self.st.model.vision = self.st.vision_cache[self.st.model.id]
+                        return
+            except:
+                pass
 
-        self._dbg(f"Model {self.model.id} not in cache. Probing...")
         b64_pixels = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAS0lEQVQ4jWNkYGB4ycDAwMPAwMDEgAn+ERD7wQLVzIVFITGABZutJAEmBuxOJ8kAil0w8AZgiyr6umAYGDDEA5GFgYHhB5QmB/wAAIcLCBsQodqvAAAAAElFTkSuQmCC"
-
-        test_messages = [
-            {
-                "role": "system",
-                "content": "You must reply only 1 or 0",
-            },
+        probe_msgs = [
+            {"role": "system", "content": "You must reply only 1 or 0"},
             {
                 "role": "user",
                 "content": [
@@ -431,236 +488,37 @@ class Filter:
                     },
                     {
                         "type": "text",
-                        "text": "Analyze this image. If the image is completely black, reply with 1. Otherwise, reply with 0. Reply 0 if you can't see the image.",
+                        "text": "Analyze this image. If the image is completely black, reply with 1. Otherwise, reply with 0.",
                     },
                 ],
             },
         ]
 
-        has_vision = False
-        try:
-            self._dbg(f"Calling generate_chat_completion for {self.model.id}")
+        res = await self.inf._infer(
+            task="Ensure Vision Capability", messages=probe_msgs
+        )
+        has_vision = "1" in res
+        self.st.model.vision = has_vision
+        self.st.vision_cache[self.st.model.id] = has_vision
 
-            response = await generate_chat_completion(
-                request=self.request,
-                form_data={
-                    "model": self.model.id,
-                    "messages": test_messages,
-                    "stream": False,
-                    "is_probe": True,
-                },
-                user=self.context,
-            )
-
-            if response and "choices" in response:
-                content = response["choices"][0]["message"].get("content", "").strip()
-                self._dbg(f"Model {self.model.id} replied: '{content}'")
-                has_vision = "1" in content
-            else:
-                self._dbg(f"Probe response null or invalid for {self.model.id}")
-
-        except Exception as e:
-            await self._err(f"Probe failed for {self.model.id}: {e}")
-            has_vision = False
-
-        self.vision_cache[self.model.id] = has_vision
         try:
             os.makedirs(os.path.dirname(CAPABILITY_CACHE_PATH), exist_ok=True)
             with open(CAPABILITY_CACHE_PATH, "w") as f:
-                json.dump(self.vision_cache, f)
-            self._dbg(f"Cache updated on disk for {self.model.id}")
-        except Exception as e:
-            await self._err(f"Disk write failed: {e}")
+                json.dump(self.st.vision_cache, f)
+        except:
+            pass
 
-        self.model.vision = has_vision
-        return
-
-    async def _detect_language(self):
-
-        self._dbg("Starting Language Detection...")
-
-        await self.emitter(
-            {
-                "type": "status",
-                "data": {
-                    "description": "Language Detection...",
-                    "done": False,
-                },
-            }
-        )
-
-        start_timestamp = time.time()
-        detected_target_lang = "English"
-
-        try:
-            detect_payload = {
-                "model": self.model.id,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Return ONLY the language name of the user text.",
-                    },
-                    {"role": "user", "content": self.model.user_prompt},
-                ],
-                "stream": False,
-                "is_probe": True,
-            }
-
-            detect_res = await generate_chat_completion(
-                request=self.request, form_data=detect_payload, user=self.context
-            )
-
-            detected_target_lang = (
-                detect_res["choices"][0]["message"]["content"].strip().replace(".", "")
-            )
-
-            self._dbg(f"Detected Language: {detected_target_lang}")
-
-            t_count = detect_res.get("usage", {}).get("total_tokens", 0)
-
-            self._register_stat(
-                "Language Detection",
-                time.time() - start_timestamp,
-                t_count,
-            )
-
-        except Exception as e:
-            await self._err(f"Language Detection failed: {e}")
-
-        self.model.language = detected_target_lang
-
-        return
-
-    async def _enhance_prompt(self):
-
-        if self.model.enhanced_prompt or self.model.trigger == "imgx":
-            self._dbg("Starting Prompt Enhancing...")
-            start_timestamp = time.time()
-            await self.emitter(
-                {
-                    "type": "status",
-                    "data": {"description": "Prompt Enhancing...", "done": False},
-                }
-            )
-
-            try:
-                system_prompt = (
-                    "You are an expert AI Image Prompt Engineer. "
-                    f"Your task is to expand the user's input into a professional, highly detailed prompt in {self.model.language}. "
-                    "Add details about lighting, camera angle, textures, environment, and artistic style. "
-                    "Return ONLY the enhanced prompt text, no introductions."
-                )
-                user_content = f"Expand this prompt: {self.model.user_prompt}"
-
-                refine_payload = {
-                    "model": self.model.id,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "stream": False,
-                }
-
-                refine_res = await generate_chat_completion(
-                    request=self.request, form_data=refine_payload, user=self.context
-                )
-
-                if "choices" in refine_res:
-                    enhanced_prompt = refine_res["choices"][0]["message"][
-                        "content"
-                    ].strip()
-
-                self._dbg(f"[Inlet] Enhanced Prompt: {enhanced_prompt}")
-
-                t_count = refine_res.get("usage", {}).get("total_tokens", 0)
-
-                self._register_stat(
-                    "Prompt Processing",
-                    time.time() - start_timestamp,
-                    t_count,
-                )
-
-            except Exception as e:
-                await self._err(f"Enhancer failed: {e}")
-
-                await self.emitter(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Enhancer Error: {e}",
-                            "done": False,
-                        },
-                    }
-                )
-
-        else:
-            enhanced_prompt = self.model.user_prompt
-
-        self.model.enhanced_prompt = re.sub(r"['\"]", "", enhanced_prompt)
-
-    def _sanitize_payload(self) -> dict:
-
-        payload = self.model.copy()
-
-        internal_keys = [
-            "trigger",  # Interno Easymage
-            "id",  # ID del modello LLM
-            "engine",  # Nome del backend
-            "base_url",  # URL del server Forge
-            "size",  # Sostituito da width/height
-            "user_prompt",  # Usiamo 'prompt' per Forge
-            "enhanced_prompt",  # Prompt già processato
-            "quality_audit",  # Flag interno
-            "persistent_vision_cache",  # Cache interna
-            "debug",  # Flag interno
-            "vision",  # Flag interno
-            "language",  # Metadato lingua
-            "b64_data",
-            "model",
-        ]
-
-        for key in internal_keys:
-            payload.pop(key, None)
-
-        payload["prompt"] = self.model.get("enhanced_prompt", "")
-
-        if "size" in self.model:
-            try:
-                w, h = map(int, self.model["size"].split("x"))
-                payload["width"] = w
-                payload["height"] = h
-            except Exception:
-                payload["width"], payload["height"] = 1024, 1024  # Default sano
-
-        if payload.get("enable_hr"):
-            payload["hr_additional_modules"] = []
-
-            if not payload.get("hr_upscaler"):
-                payload["hr_upscaler"] = "Latent"
-
-        return payload
-
-    async def _generate_image(self, body):
-
+    async def _generate_image(self):
         image_gen_start = time.time()
-
         engine = self.request.app.state.config.IMAGE_GENERATION_ENGINE
+        await self.em.emit_status("Generating Image..")
 
         try:
             if engine in ["automatic1111", ""]:
-                self._dbg("Using Forge Direct Bypass (Force params)...")
-
-                # --- PAYLOAD FORGE ---
                 payload = self._sanitize_payload()
-
-                self._dmp(payload)
-
-                # --- CALL FORGE ---
                 base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL.rstrip(
                     "/"
                 )
-                api_url = f"{base_url}/sdapi/v1/txt2img"
-
                 headers = {}
                 api_auth = self.request.app.state.config.AUTOMATIC1111_API_AUTH
                 if api_auth:
@@ -670,505 +528,279 @@ class Filter:
                     else:
                         headers["Authorization"] = f"Bearer {api_auth}"
 
-                import httpx
-
                 async with httpx.AsyncClient() as client:
                     r = await client.post(
-                        api_url, json=payload, headers=headers, timeout=None
+                        f"{base_url}/sdapi/v1/txt2img",
+                        json=payload,
+                        headers=headers,
+                        timeout=None,
                     )
                     r.raise_for_status()
                     res = r.json()
 
-                self._dmp(res["parameters"])
-
-                # --- PROCESS FORGE RESPONSE ---
-                if "images" in res and res["images"]:
-                    img_b64 = res["images"][0]
-                    if "," in img_b64:
-                        img_b64 = img_b64.split(",")[1]
-
-                    # Store for Vision Audit
-                    self.model.b64_data = img_b64
-                    self.model.image_url = f"data:image/png;base64,{img_b64}"
-                else:
-                    raise Exception("No images in Forge response")
-
+                img_b64 = res["images"][0].split(",")[-1]
+                self.st.model.b64_data = img_b64
+                self.st.model.image_url = f"data:image/png;base64,{img_b64}"
             else:
-                self._dbg(f"Using Standard OWUI Router for engine: {engine}")
-                # Fallback to standard Pydantic form
                 form_data = CreateImageForm(
-                    prompt=self.model.enhanced_prompt,
+                    prompt=self.st.model.enhanced_prompt,
                     n=1,
-                    size=self.model.size,
-                    model=self.model.model,
+                    size=self.st.model.size,
+                    model=self.st.model.model,
                 )
+                gen_res = await image_generations(self.request, form_data, self.user)
+                if gen_res:
+                    self.st.model.image_url = gen_res[0]["url"]
 
-                gen_res = await image_generations(
-                    request=self.request,
-                    form_data=form_data,
-                    user=self.context,
-                )
-
-                if gen_res and len(gen_res) > 0:
-                    self.model.image_url = gen_res[0]["url"]
-                    
-                    # For standard engine, we don't have b64_data in memory
-                    if hasattr(self.model, "b64_data"):
-                        del self.model.b64_data
-                else:
-                    raise Exception("Standard image generation failed")
-
-            # Finalize
-            self.image_gen_time_int = int(time.time() - image_gen_start)
-            await self.emitter(
-                {
-                    "type": "message",
-                    "data": {"content": f"![Generated Image]({self.model.image_url})"},
-                }
-            )
-
+            self.st.image_gen_time_int = int(time.time() - image_gen_start)
+            await self.em.emit_message(f"![Generated Image]({self.st.model.image_url})")
         except Exception as e:
-            await self._err(f"Image Generation failed ({engine}): {e}")
+            await self._err(f"Image Gen Failed: {e}")
 
     async def _vision_audit(self):
-        audit_results = {"score": None, "critique": None, "emoji": "⚪"}
+        if not self.st.model.quality_audit or not self.st.model.vision:
+            return
 
-        if not self.valves.quality_audit or not self.model.vision:
-            return audit_results
-
-        self._dbg("Starting Vision Quality Audit...")
-        await self.emitter(
-            {
-                "type": "status",
-                "data": {"description": "Visual Quality Audit...", "done": False},
-            }
-        )
-        audit_start = time.time()
-        try:
-            # --- HYBRID IMAGE LOADING ---
-            if hasattr(self.model, "b64_data") and self.model.b64_data:
-                self._dbg("Audit: Using image from memory (Base64)")
-                image_url_for_vision = f"data:image/png;base64,{self.model.b64_data}"
-            else:
-                self._dbg(f"Audit: Loading image from URL: {self.model.image_url}")
-                image_url_for_vision = self.model.image_url
-            # -----------------------------
-
-            audit_instruction = f"""
-                RESET: ######################################### NEW DATA STREAM - NO PREVIOUS CONTEXT ACCESSIBLE ###########################################            
-                            
-                ENVIRONMENT: IGNORE ALL PRIOR CONTEXT. NEURAL CACHE RESET. STARTING FROM ZERO-STATE.
-
-                ENVIRONMENT: STATELESS SANDBOX. Treat this as the first and only image in history.
-
-                RULE: Context Break. Terminate processing of previous context.
-
-                RULE: Clear your working memory buffer and analyze this input in total isolation.
-
-                TASK: AUDIT ANALYSIS (Audit scores is 0 to 100, where 0 is bad and 100 good): 
-                        Compare the image with the reference prompt: '{self.model.enhanced_prompt}', 
-                        Describe what you actually see in the image.
-                        Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
-                        Identify any contradictions, missing elements, or hallucinations (like objects that shouldn't be there).
-                        Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line. 
-                    
-                RULE: Be extremely severe in technical evaluation. Do not excuse defects as limitations of resolution or scale.
-
-                TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
-                        Perform a ruthless technical audit. Identify every visual flaw.
-                        Evaluate NOISE as random pixel color variations.
-                        Evaluate GRAIN as textural salt-and-pepper luminance noise.
-                        Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
-                        Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
-
-                MANDATORY: Respond in {self.model.language}. NO MARKDOWN. Use plain text and • for lists. Be objective.
-
-                MANDATORY: Your final response MUST end with a single line containing only the following metrics:
-
-                SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
-            """
-
-            vision_res = await generate_chat_completion(
-                request=self.request,
-                form_data={
-                    "model": self.model.id,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": audit_instruction},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url_for_vision},
-                                },
-                            ],
-                        }
-                    ],
-                    "stream": False,
-                },
-                user=self.context,
-            )
-
-            raw_v_text = vision_res["choices"][0]["message"]["content"].strip()
-            score_match = re.search(r"SCORE:\s*(\d+)", raw_v_text, re.IGNORECASE)
-
-            if score_match:
-                val = int(score_match.group(1))
-                audit_results["score"] = val
-                audit_results["critique"] = re.sub(
-                    r"SCORE:\s*\d+", "", raw_v_text, flags=re.I
-                ).strip()
-                audit_results["emoji"] = (
-                    "🟢"
-                    if val >= 80
-                    else (
-                        "🔵"
-                        if val >= 70
-                        else "🟡"
-                        if val >= 60
-                        else "🟠"
-                        if val >= 40
-                        else "🔴"
-                    )
-                )
-            else:
-                audit_results["critique"] = raw_v_text
-
-            t_count = vision_res.get("usage", {}).get("total_tokens", 0)
-            self._register_stat("Visual Audit", time.time() - audit_start, t_count)
-
-        except Exception as e:
-            await self._err(f"Vision Audit failed: {e}")
-            audit_results["critique"] = "Vision Audit failed."
-
-        self.quality_audit = audit_results
-        return audit_results
-
-    async def _output_delivery(self):
-
-        total_exec_time = int(time.time() - self.start_time)
-        clean_prompt = self.model.enhanced_prompt.replace("*", "")
-
-        await self.emitter(
-            {
-                "type": "citation",
-                "data": {
-                    "source": {"name": "🚀 PROMPT"},
-                    "document": [clean_prompt],
-                    "metadata": [{"source": "1", "id": "p"}],
-                },
-            }
-        )
-        if self.model.quality_audit:
-            if not self.model.vision:
-                await self.emitter(
-                    {
-                        "type": "citation",
-                        "data": {
-                            "source": {"name": "‼️NO VISION"},
-                            "document": [
-                                f"Model {self.model.id} lacks vision capabilities for audit."
-                            ],
-                            "metadata": [{"source": "2", "id": "b"}],
-                        },
-                    }
-                )
-            elif self.quality_audit["critique"]:
-                await self.emitter(
-                    {
-                        "type": "citation",
-                        "data": {
-                            "source": {
-                                "name": f"{self.quality_audit['emoji']} SCORE: {self.quality_audit['score']}%"
-                            },
-                            "document": [
-                                self.quality_audit["critique"].replace("*", "")
-                            ],
-                            "metadata": [{"source": "2", "id": "a"}],
-                        },
-                    }
-                )
-
-        mm = "multimodal" if self.model.vision else "not multimodal"
-        tech_details = (
-            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.model.id} ({mm})\n → Engine Model: {self.valves.model}\n"
-            f" → Resolution: {self.valves.size} | Steps: {self.valves.steps}\n → Engine: {self.model.engine}\n"
-            f"\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲 𝗠𝗲𝘁𝗿𝗶𝗰𝘀\n → Total Time: {total_exec_time}s\n → Image Gen: {self.image_gen_time_int}s\n"
-            + "\n".join(self.performance_stats)
-        )
-        await self.emitter(
-            {
-                "type": "citation",
-                "data": {
-                    "source": {"name": "🔍 DETAILS"},
-                    "document": [tech_details],
-                    "metadata": [{"source": "3", "id": "d"}],
-                },
-            }
+        img_url = (
+            f"data:image/png;base64,{self.st.model.b64_data}"
+            if self.st.model.b64_data
+            else self.st.model.image_url
         )
 
-        tps = (
-            self.cumulative_tokens / self.cumulative_elapsed_time
-            if self.cumulative_elapsed_time > 0
-            else 0
-        )
-        summary = f"{total_exec_time}s total | {self.image_gen_time_int}s img | {self.cumulative_tokens} tk | {tps:.1f} tk/s"
+        audit_instruction = f"""
+            RESET: ######################################### NEW DATA STREAM ###########################################            
+            ENVIRONMENT: STATELESS SANDBOX.
+            TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
+                    Compare image with: '{self.st.model.enhanced_prompt}',
+                    Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+            TASK: TECHNICAL EVALUATION:
+                    Evaluate NOISE, GRAIN, MELTING, JAGGIES.
+            MANDATORY: Respond in {self.st.model.language}. NO MARKDOWN. Use plain text and • for lists.
+            MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+        """
 
-        await self.emitter({"type": "message", "data": {"content": "\n\n[1] [2] [3]"}})
-        await self.emitter(
-            {"type": "status", "data": {"description": summary, "done": True}}
-        )
-
-    async def _output_prompt(self):
-
-        # 1. Emit the enhanced prompt as a message
-        await self.emitter(
-            {
-                "type": "message",
-                "data": {"content": self.model.enhanced_prompt},
-            }
-        )
-
-        # 2. Calculate specific timings for imgp (Prompt Enhancement only)
-        total_exec_time = int(time.time() - self.start_time)
-        tps = (
-            self.cumulative_tokens / self.cumulative_elapsed_time
-            if self.cumulative_elapsed_time > 0
-            else 0
-        )
-
-        # 3. Create a specialized summary string for imgp
-        summary = (
-            f"{total_exec_time}s total | {self.cumulative_tokens} tk | {tps:.1f} tk/s"
-        )
-
-        # 4. Close the status correctly
-        await self.emitter(
-            {"type": "status", "data": {"description": summary, "done": True}}
-        )
-
-    def _dmp(self, data: Optional = None):
-        if self.valves.debug:
-            header = "—" * 80 + "\n📦 EASYMAGE DUMP:\n" + "—" * 80
-            print(header, file=sys.stderr, flush=True)
-            if isinstance(data, dict):
-                print(
-                    "dict: " + json.dumps(data, indent=4),
-                    file=sys.stderr,
-                    flush=True,
-                )
-            elif isinstance(data, BaseModel):
-                print(
-                    "BaseModel: " + json.dumps(data.model_dump(), indent=4),
-                    file=sys.stderr,
-                    flush=True,
-                )
-            else:
-                print(
-                    "...",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            print("—" * 80, file=sys.stderr, flush=True)
-
-    def _dbg(self, message: str, error: bool = False):
-        if error:
-            print(f"❌ EASYMAGE ERROR: {message}", file=sys.stderr, flush=True)
-        elif self.valves.debug:
-            print(f"⚡ EASYMAGE DEBUG: {message}", file=sys.stderr, flush=True)
-
-    async def _err(self, e: Exception):
-        self._dbg(str(e), True)
-        if self.emitter:
-            await self.emitter(
+        raw_v_text = await self.inf._infer(
+            task="Visual Quality Audit",
+            messages=[
                 {
-                    "type": "message",
-                    "data": {"content": f"\n\n❌ EASYMAGE ERROR: {str(e)}\n"},
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": audit_instruction},
+                        {"type": "image_url", "image_url": {"url": img_url}},
+                    ],
+                }
+            ],
+        )
+
+        score_match = re.search(r"SCORE:\s*(\d+)", raw_v_text, re.IGNORECASE)
+        if score_match:
+            val = int(score_match.group(1))
+            self.st.quality_audit_results.update(
+                {
+                    "score": val,
+                    "critique": re.sub(
+                        r"SCORE:\s*\d+", "", raw_v_text, flags=re.I
+                    ).strip(),
+                    "emoji": (
+                        "🟢"
+                        if val >= 80
+                        else (
+                            "🔵"
+                            if val >= 70
+                            else "🟡" if val >= 60 else "🟠" if val >= 40 else "🔴"
+                        )
+                    ),
                 }
             )
+        else:
+            self.st.quality_audit_results["critique"] = raw_v_text
 
-    def _register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
-        self.cumulative_tokens += token_count
-        self.cumulative_elapsed_time += elapsed
-        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
-        self.performance_stats.append(
-            f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tokens_per_second:.1f} tk/s"
+    async def _output_delivery(self):
+        total_time = int(time.time() - self.st.start_time)
+        await self.em.emit_citation(
+            "🚀 PROMPT", self.st.model.enhanced_prompt.replace("*", ""), "1", "p"
         )
+
+        if self.st.model.quality_audit:
+            if not self.st.model.vision:
+                await self.em.emit_citation(
+                    "‼️NO VISION", f"Model {self.st.model.id} lacks vision.", "2", "b"
+                )
+            elif self.st.quality_audit_results["critique"]:
+                await self.em.emit_citation(
+                    f"{self.st.quality_audit_results['emoji']} SCORE: {self.st.quality_audit_results['score']}%",
+                    self.st.quality_audit_results["critique"].replace("*", ""),
+                    "2",
+                    "a",
+                )
+
+        tech = (
+            f"\n⠀\n𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻\n → Inference Model: {self.st.model.id}\n → Engine: {self.st.model.engine}\n"
+            f" → Res: {self.st.model.size} | Steps: {self.st.model.get('steps')}\n\n𝗣𝗲𝗿𝗳𝗼𝗿𝗺𝗮𝗻𝗰𝗲\n → Total: {total_time}s\n"
+            + "\n".join(self.st.performance_stats)
+        )
+        await self.em.emit_citation("🔍 DETAILS", tech, "3", "d")
+
+        tps = (
+            self.st.cumulative_tokens / self.st.cumulative_elapsed_time
+            if self.st.cumulative_elapsed_time > 0
+            else 0
+        )
+        await self.em.emit_message("\n\n[1] [2] [3]")
+        await self.em.emit_status(
+            f"{total_time}s total | {self.st.image_gen_time_int}s img | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s",
+            True,
+        )
+
+    async def _output_status_only(self):
+        tps = (
+            self.st.cumulative_tokens / self.st.cumulative_elapsed_time
+            if self.st.cumulative_elapsed_time > 0
+            else 0
+        )
+        summary = f"{int(time.time() - self.st.start_time)}s total | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s"
+        await self.em.emit_status(summary, True)
+
+    # --- HELPERS ---
+
+    def _apply_global_settings(self):
+        conf = self.request.app.state.config
+        state_dict = getattr(conf, "_state", {})
+        engine = str(
+            self._unwrap(state_dict.get("IMAGE_GENERATION_ENGINE", "none"))
+        ).lower()
+
+        settings = {"engine": engine}
+        for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
+            settings[self._clean_key(k, engine)] = self._unwrap(state_dict.get(k))
+
+        for k in self._ENGINE_MAP.get(engine, []):
+            val = self._unwrap(state_dict.get(k))
+            if val is not None:
+                settings[self._clean_key(k, engine)] = val
+
+        self.st.model.update(settings)
+
+    def _validate_and_normalize(self):
+        eng, mdl = (
+            self.st.model.get("engine"),
+            str(self.st.model.get("model", "")).lower(),
+        )
+        if eng == "openai" and "dall-e" not in mdl:
+            self.st.model["model"] = "dall-e-3"
+        elif eng == "gemini" and "imagen" not in mdl:
+            self.st.model["model"] = "imagen-3.0-fast-generate-001"
+
+        sz = self.st.model.get("size", "1024x1024")
+        ar = self.st.model.get("aspect_ratio")
+        try:
+            w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
+            ratio = (
+                (int(ar.split(":")[0]) / int(ar.split(":")[1]))
+                if ar and ":" in str(ar)
+                else w / h
+            )
+        except:
+            w, h, ratio = 1024, 1024, 1.0
+
+        if eng == "openai" or "dall-e" in mdl:
+            if ratio > 1.2:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1792x1024",
+                    "16:9",
+                )
+            elif ratio < 0.8:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1024x1792",
+                    "9:16",
+                )
+            else:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1024x1024",
+                    "1:1",
+                )
+        else:
+            h = (int(w / ratio) // 8) * 8
+            self.st.model["size"] = f"{w}x{h}"
+
+    def _sanitize_payload(self) -> dict:
+        p = self.st.model.copy()
+        for k in [
+            "trigger",
+            "id",
+            "engine",
+            "user_prompt",
+            "enhanced_prompt",
+            "quality_audit",
+            "persistent_vision_cache",
+            "debug",
+            "vision",
+            "language",
+            "b64_data",
+            "model",
+            "styles",
+        ]:
+            p.pop(k, None)
+        p["prompt"] = self.st.model.get("enhanced_prompt", "")
+        w, h = map(int, self.st.model.get("size", "1024x1024").split("x"))
+        p["width"], p["height"] = w, h
+        return p
+
+    def _check_input(self, body: dict) -> Optional[Tuple[str, str]]:
+        if body.get("is_probe"):
+            return None
+        messages = body.get("messages", [])
+        if not messages:
+            return None
+        last = messages[-1]["content"]
+        text = last[0].get("text", "") if isinstance(last, list) else last
+        match = re.match(r"^(img|imgx)\s", text, re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).lower(), text[match.end() :].strip()
 
     def _unwrap(self, obj):
         if hasattr(obj, "value"):
             return self._unwrap(obj.value)
         if isinstance(obj, dict):
             return {k: self._unwrap(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._unwrap(i) for i in obj]
         return obj
 
     def _clean_key(self, key, engine):
-        k = key.upper()
         k = (
-            k.replace("IMAGE_GENERATION_", "")
+            key.upper()
+            .replace("IMAGE_GENERATION_", "")
             .replace("IMAGE_", "")
             .replace("ENABLE_IMAGE_", "ENABLE_")
         )
-        engine_prefix = f"{engine.upper()}_"
-        k = (
-            k.replace(f"{engine_prefix}API_", "")
-            .replace(engine_prefix, "")
-            .replace("IMAGES_", "")
+        pre = f"{engine.upper()}_"
+        return (
+            k.replace(f"{pre}API_", "").replace(pre, "").replace("IMAGES_", "").lower()
         )
-        return k.lower()
-
-    def _normalize_sampler(self, name):
-        n = (
-            name.lower()
-            .replace("_", "")
-            .replace(" ", "")
-            .replace("-", "")
-            .replace("++", "")
-        )
-
-        mapping = {
-            "d3s": "DPM++ 3M SDE",
-            "d2sh": "DPM++ 2M SDE Heun",
-            "d2s": "DPM++ 2M SDE",
-            "d2m": "DPM++ 2M",
-            "d2sa": "DPM++ 2S a",
-            "ds": "DPM++ SDE",
-            "ea": "Euler a",
-            "e": "Euler",
-            "l": "LMS",
-            "h": "Heun",
-            "d2": "DPM2",
-            "d2a": "DPM2 a",
-            "df": "DPM fast",
-            "dad": "DPM adaptive",
-            "r": "Restart",
-            "h2": "HeunPP2",
-            "ip": "IPNDM",
-            "ipv": "IPNDM_V",
-            "de": "DEIS",
-            "u": "UniPC",
-            "lcm": "LCM",
-            "di": "DDIM",
-            "dic": "DDIM CFG++",
-            "dp": "DDPM",
-        }
-        return mapping.get(n, name)
-
-    def _normalize_scheduler(self, name):
-        n = name.lower().replace("_", "").replace(" ", "").replace("-", "")
-
-        mapping = {
-            "a": "Automatic",
-            "u": "Uniform",
-            "k": "Karras",
-            "e": "Exponential",
-            "pe": "Polyexponential",
-            "su": "SGM Uniform",
-            "ko": "KL Optimal",
-            "ays": "Align Your Steps",
-            "aysg": "Align Your Steps GITS",
-            "ays11": "Align Your Steps 11",
-            "ays32": "Align Your Steps 32",
-            "s": "Simple",
-            "n": "Normal",
-            "di": "DDIM",
-            "b": "Beta",
-            "t": "Turbo",
-        }
-        return mapping.get(n, name.capitalize())
-
-    def _check_input(self, body: dict) -> str | None:
-        if body.get("is_probe"):
-            return None
-
-        messages = body.get("messages", [])
-        if not messages:
-            return None
-
-        last_message_content = messages[-1]["content"]
-        input_text = (
-            last_message_content[0].get("text", "")
-            if isinstance(last_message_content, list)
-            else last_message_content
-        )
-
-        match = re.match(r"^(img|imgx)\s", input_text, re.IGNORECASE)
-
-        if not match:
-            return None
-
-        self.model["trigger"] = match.group(1).lower()
-
-        return input_text[match.end() :].strip()
-
-    def _normalize_dimensions(self):
-        engine = self.model.get("engine")
-        model_id = str(self.model.get("model", "")).lower()
-        ar_str = self.model.get("aspect_ratio")
-        sz_raw = self.model.get("size", "1024x1024")
-
-        # 1. Se non c'è un Aspect Ratio esplicito, lo deriviamo dai pixel
-        if not ar_str or ":" not in str(ar_str):
-            # Questa funzione ora deve solo restituire w, h, ratio
-            # senza applicare logiche di engine
-            w, h, ratio = self._get_raw_dimensions(sz_raw)
-        else:
-            try:
-                rw, rh = map(int, ar_str.split(":"))
-                ratio = rw / rh
-                # Estraiamo la larghezza base da sz_raw
-                w = int(sz_raw.split("x")[0]) if "x" in str(sz_raw) else int(sz_raw)
-            except:
-                w, ratio = 1024, 1.0
-
-        # 2. APPLICAZIONE LOGICA ENGINE (Punto unico di controllo)
-        if engine == "openai" or "dall-e" in model_id:
-            if "dall-e-2" in model_id:
-                # D2: Solo quadrato, snap 256/512/1024
-                f_dim = 256 if w <= 256 else (512 if w <= 512 else 1024)
-                self.model["size"], self.model["aspect_ratio"] = (
-                    f"{f_dim}x{f_dim}",
-                    "1:1",
-                )
-            else:
-                # D3: Snap standard
-                if ratio > 1.2:
-                    self.model["size"], self.model["aspect_ratio"] = "1792x1024", "16:9"
-                elif ratio < 0.8:
-                    self.model["size"], self.model["aspect_ratio"] = "1024x1792", "9:16"
-                else:
-                    self.model["size"], self.model["aspect_ratio"] = "1024x1024", "1:1"
-
-        else:
-            # Forge, Comfy, Gemini: Calcolo libero basato su Width e Ratio
-            # Ottimizzato per multipli di 8 per la tua RTX 5090
-            h = (int(w / ratio) // 8) * 8
-            self.model["size"] = f"{w}x{h}"
-            # Aggiorniamo l'AR testuale per i metadati
-            if 0.95 <= ratio <= 1.05:
-                self.model["aspect_ratio"] = "1:1"
-            elif ratio > 1.2:
-                self.model["aspect_ratio"] = "16:9"
-            else:
-                self.model["aspect_ratio"] = "9:16"
-
-    def _get_raw_dimensions(self, sz_raw):
-        """English: Internal helper to extract numeric dimensions from raw size string."""
-        try:
-            if "x" in str(sz_raw):
-                w, h = map(int, sz_raw.split("x"))
-            else:
-                w, h = int(sz_raw), int(sz_raw)
-            return w, h, w / h
-        except:
-            return 1024, 1024, 1.0
-
-    # =====================================================================
 
     def _suppress_output(self, body: dict) -> dict:
         body["messages"] = [{"role": "assistant", "content": ""}]
         body["max_tokens"] = 1
         body["stop"] = [chr(i) for i in range(128)]
         return body
+
+    def _dbg(self, msg: str):
+        if self.valves.debug:
+            print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
+
+    async def _err(self, e: Any):
+        self._dbg(f"ERROR: {e}")
+        await self.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
+
+    def _dmp(self):
+        if not self.valves.debug:
+            return
+        print(
+            "—" * 80
+            + "\n📦 EASYMAGE DUMP\n"
+            + json.dumps(self.st.model, indent=2)
+            + "\n"
+            + "—" * 80,
+            file=sys.stderr,
+            flush=True,
+        )
