@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.7.2
+version: 0.7.4
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -90,7 +90,7 @@ class EasymageConfig:
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
         TASK: TECHNICAL EVALUATION:
                 Evaluate NOISE, GRAIN, MELTING, JAGGIES.
-        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists.
+        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists and ➔ for headings.
         MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
 
@@ -112,7 +112,7 @@ class EasymageConfig:
                 Evaluate GRAIN as textural salt-and-pepper luminance noise.
                 Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
                 Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
-        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists. Be objective.
+        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists and ➔ for headings. Be objective.
         MANDATORY: Final response MUST end with a single line containing only the following metrics:
         SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
@@ -141,6 +141,7 @@ class EasymageState:
         self.model = Store(
             {
                 "trigger": None,
+                "vision": False,
                 "debug": valves.debug,
                 "enhanced_prompt": valves.enhanced_prompt,
                 "quality_audit": valves.quality_audit,
@@ -501,7 +502,10 @@ class Filter:
             {k: v for k, v in self.valves.model_dump().items() if v is not None}
         )
         self.parser.parse_input(user_prompt, self.st.model)
-        await self._check_vision_capability()
+
+        # Vision Capability Probe - LOCAL OPTIMIZATION: skip if only text enhancement
+        if self.st.model.trigger == "img":
+            await self._check_vision_capability()
 
         # Language Detection - DO NOT ALTER INSTRUCTION
         detected_lang = await self.inf._infer(
@@ -540,6 +544,7 @@ class Filter:
         self._validate_and_normalize()
 
     async def _check_vision_capability(self):
+        """Probe model for vision support."""
         if self.st.model.debug or not self.st.valves.persistent_vision_cache:
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
