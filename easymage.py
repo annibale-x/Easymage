@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.7.4
+version: 0.7.5
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -112,9 +112,19 @@ class EasymageConfig:
                 Evaluate GRAIN as textural salt-and-pepper luminance noise.
                 Evaluate MELTING as lack of structural integrity, blurred textures, or wax-like surfaces.
                 Evaluate JAGGIES as staircase artifacts and aliasing on diagonal lines and edges.
-        MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists and ➔ for headings. Be objective.
+        MANDATORY: Respond in {lang}. Be objective. NO MARKDOWN. Use plain text and • for lists and ➔ for headings. 
         MANDATORY: Final response MUST end with a single line containing only the following metrics:
         SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
+    """
+
+    PROMPT_ENHANCE = """
+        ROLE: You are an expert AI Image Prompt Engineer.
+        TASK: Expand the user's input into a professional, highly detailed prompt in {lang}.
+        TASK: Add details about lighting, camera angle, textures, environment, and artistic style.
+        RULE: Output ONLY the enhanced prompt.
+        RULE: End the response immediately after the last descriptive sentence.
+        RULE: Do not add any text, notes, or disclaimers after the prompt.
+        RULE: Any text after the prompt is a violation of your protocol.
     """
 
 
@@ -264,10 +274,8 @@ class InferenceEngine:
             if response:
                 content = response["choices"][0]["message"].get("content", "").strip()
                 # Maintain internal logic: Clean thinking tags
-                content = re.sub(
-                    r"<think>.*?</think>", "", content, flags=re.DOTALL
-                ).strip()
-                content = re.sub(r"</?text>", "", content).strip()
+                content = content.split("</think>")[-1].strip()
+                # content = re.sub(r"</?text>", "", content).strip()
 
                 if task:
                     self.state.register_stat(
@@ -519,15 +527,16 @@ class Filter:
 
         # Enhance Prompt - DO NOT ALTER INSTRUCTION
         if self.st.model.enhanced_prompt or self.st.model.trigger == "imgx":
+
+            instruction = self.config.PROMPT_ENHANCE.format(lang=self.st.model.language)
+
+
+
+
             enhanced = await self.inf._infer(
                 task="Prompt Enhancing",
                 data={
-                    "system": (
-                        "You are an expert AI Image Prompt Engineer. "
-                        f"Your task is to expand the user's input into a professional, highly detailed prompt in {self.st.model.language}. "
-                        "Add details about lighting, camera angle, textures, environment, and artistic style. "
-                        "Return ONLY the enhanced prompt text, no introductions."
-                    ),
+                    "system": instruction,
                     "user": f"Expand this prompt: {self.st.model.user_prompt}",
                 },
             )
