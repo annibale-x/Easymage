@@ -1,11 +1,11 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.15
+version: 0.8.16
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
 author_email: annibale.x@gmail.com
-Description: Image generation filter and prompt enhancer for Open WebUI.
+Description: Image generation filter and prompt enhancer for Open WebUI with deterministic control.
 """
 
 import json
@@ -19,7 +19,6 @@ from typing import Optional, Any, List, Dict, Tuple, Union
 from pydantic import BaseModel, Field
 from open_webui.routers.images import image_generations, CreateImageForm  # type: ignore
 from open_webui.models.users import UserModel  # type: ignore
-from open_webui.main import generate_chat_completion  # type: ignore
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
@@ -159,10 +158,8 @@ class Store(dict):
     """Dynamic dictionary storage with dot notation access."""
 
     def __getattr__(self, item):
-
         try:
             return self[item]
-
         except KeyError:
             return None
 
@@ -174,7 +171,6 @@ class EasymageState:
     """Manages internal state, configuration, and performance tracking."""
 
     def __init__(self, valves):
-
         self.model = Store(
             {
                 "trigger": None,
@@ -183,7 +179,6 @@ class EasymageState:
                 "enhanced_prompt": valves.enhanced_prompt,
                 "quality_audit": valves.quality_audit,
                 "persistent_vision_cache": valves.persistent_vision_cache,
-                # Added to store the LLM backend type (ollama vs openai)
                 "llm_type": "ollama",
             }
         )
@@ -197,8 +192,6 @@ class EasymageState:
         self.vision_cache = {}
 
     def register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
-        """Logs duration and token usage for performance metrics."""
-
         self.cumulative_tokens += token_count
         self.cumulative_elapsed_time += elapsed
         tps = token_count / elapsed if elapsed > 0 else 0
@@ -211,36 +204,27 @@ class EasymageState:
 
 
 class EmitterService:
-    """Handles communication with event emitter. Formatting for UI."""
+    """Handles communication with event emitter."""
 
     def __init__(self, event_emitter):
-
         self.emitter = event_emitter
 
     async def emit_message(self, content: str):
-        """Sends a message update to the chat UI with code block formatting."""
-
         if self.emitter:
             fmt = (
                 content.replace("```", "```\n") if content.endswith("```") else content
             )
-
             if "```" in content:
                 fmt = re.sub(r"(```[^\n]*\n.*?\n```)", r"\1\n", fmt, flags=re.DOTALL)
-
             await self.emitter({"type": "message", "data": {"content": fmt}})
 
     async def emit_status(self, description: str, done: bool = False):
-        """Sends a status indicator update to the chat UI."""
-
         if self.emitter:
             await self.emitter(
                 {"type": "status", "data": {"description": description, "done": done}}
             )
 
     async def emit_citation(self, name: str, document: str, source: str, cid: str):
-        """Sends a formal citation record to the chat UI."""
-
         if self.emitter:
             await self.emitter(
                 {
@@ -253,40 +237,70 @@ class EmitterService:
                 }
             )
 
-    async def emit_debug(self, msg: str):
-        """Prints diagnostic logs to standard error if debug is enabled."""
-        print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
+
+class DebugService:
+    """Handles stderr logging, error reporting, and safe object dumping."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def log(self, msg: str, is_error: bool = False):
+        """Prints diagnostic logs to standard error for Docker logs visibility."""
+        if self.ctx.valves.debug or is_error:
+            if is_error:
+                print(f"\n\n❌ EASYMAGE ERROR: {msg}\n", file=sys.stderr, flush=True)
+            else:
+                print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
+
+    async def error(self, e: Any):
+        """Logs exceptions and notifies the chat UI of critical filter errors."""
+        self.log(str(e), is_error=True)
+        await self.ctx.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
+
+    def dump(self, data: Any = None):
+        """
+        Indestructible Surgical Dumper
+        Handles the new PersistentConfig objects from Open WebUI
+        """
+        if not self.ctx.valves.debug:
+            return
+
+        header = "—" * 60 + "\n📦 EASYMAGE DUMP:\n" + "—" * 60
+        print(header, file=sys.stderr, flush=True)
+
+        def universal_resolver(obj):
+            # Intercept Open WebUI PersistentConfig objects
+            if hasattr(obj, "value"):
+                return obj.value
+            # Intercept Pydantic models
+            if hasattr(obj, "model_dump"):
+                return obj.model_dump()
+            # Fallback
+            return str(obj)
+
+        try:
+            clean_json = json.dumps(data, indent=2, default=universal_resolver)
+            print(clean_json, file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"❌ DUMP ERROR: {str(e)}", file=sys.stderr, flush=True)
+
+        print("—" * 60, file=sys.stderr, flush=True)
 
 
 class InferenceEngine:
-    """Generalized inference engine for Text, Vision, and Probe tasks with deterministic control."""
+    """Handles LLM interactions (Text & Vision) with context access."""
 
-    def __init__(self, request, user, state: EasymageState, emitter: EmitterService):
-        self.request, self.user, self.state, self.emitter = (
-            request,
-            user,
-            state,
-            emitter,
-        )
+    def __init__(self, ctx):
+        self.ctx = ctx  # Access to Filter instance
 
     async def _infer(
         self, task: Optional[str], data: Dict[str, Any], creative_mode: bool = False
     ) -> str:
-        """Executes LLM chat completions with mode-aware determinism.
-
-        Args:
-            task: UI status label.
-            data: Payload with 'system' and 'user'.
-            creative_mode: If True, respects user seed (-1 is random).
-                           If False, forces technical determinism (Seed 42, Temp 0).
-        """
-
         start = time.time()
-
         if task:
-            await self.emitter.emit_status(f"{task}..")
+            await self.ctx.em.emit_status(f"{task}..")
 
-        # 1. Prepare Messages
+        # Prepare Messages
         msgs = []
         if sys_c := data.get("system"):
             clean_sys = re.sub(r"\s+", " ", sys_c).strip()
@@ -305,67 +319,54 @@ class InferenceEngine:
             clean_user = re.sub(r"\s+", " ", str(user_c)).strip()
             msgs.append({"role": "user", "content": clean_user})
 
-        # 2. Determine Configuration
+        # Configure Determinism
         if creative_mode:
-            # User Intent Mode (Prompt Enhancing)
+            # Mode: PROMPT ENHANCING
+            # Temp 0.7 allows the Seed to influence the choice path.
+            temperature = 0.7
+
             s_val = (
-                int(self.state.model.seed) if self.state.model.seed is not None else -1
+                int(self.ctx.st.model.seed)
+                if self.ctx.st.model.seed is not None
+                else -1
             )
 
             if s_val == -1:
-                # Random / Creative
-                seed = None
-                temperature = 0.7
+                seed = None  # True Random
             else:
-                # User-forced Determinism
-                seed = s_val
-                temperature = 0.0
+                seed = s_val  # Deterministic Randomness
         else:
-            # Technical Mode (Language Detect, Vision Audit)
-            # Must always be consistent regardless of user seed
-            seed = 42
-            temperature = 0.0
+            # Mode: TECHNICAL / AUDIT
+            # Temp 0.0 forces Greedy Decoding (Seed is technically ignored but we pass 42)
+            seed, temperature = 42, 0.0
 
-        # 3. Dispatch
-        backend_type = getattr(self.state.model, "llm_type", "ollama")
+        # Dispatch
+        backend_type = getattr(self.ctx.st.model, "llm_type", "ollama")
 
         try:
-            content = ""
-            usage_tokens = 0
-
             if backend_type == "ollama":
-                content, usage_tokens = await self._infer_ollama(
-                    msgs, seed, temperature
-                )
+                content, usage = await self._infer_ollama(msgs, seed, temperature)
             else:
-                content, usage_tokens = await self._infer_openai(
-                    msgs, seed, temperature
-                )
+                content, usage = await self._infer_openai(msgs, seed, temperature)
 
-            content = content.split("</think>")[-1].strip()
-            content = content.strip('"').strip()
+            content = content.split("</think>")[-1].strip().strip('"').strip()
 
             if task:
-                self.state.register_stat(task, time.time() - start, usage_tokens)
+                self.ctx.st.register_stat(task, time.time() - start, usage)
 
             return content
 
         except Exception as e:
-            await self.emitter.emit_debug(f"INFERENCE ERROR ({task}): {e}")
-            print(f"Inference Error ({task}): {e}", file=sys.stderr)
+            self.ctx.debug.log(f"INFERENCE ERROR ({task}): {e}", is_error=True)
             return ""
 
     async def _infer_ollama(
         self, messages: List[Dict], seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
-        """Direct call to Ollama API with option encapsulation."""
+        conf = self.ctx.request.app.state.config
+        base_urls = getattr(conf, "OLLAMA_BASE_URLS", [])
+        base_url = base_urls[0].rstrip("/") if base_urls else "http://localhost:11434"
 
-        config = self.request.app.state.config
-        base_urls = getattr(config, "OLLAMA_BASE_URLS", [])
-        base_url = base_urls[0] if base_urls else "http://host.docker.internal:11434"
-        base_url = base_url.rstrip("/")
-
-        # Construct Options
         options = {
             "temperature": temperature,
             "num_ctx": 4096,
@@ -374,50 +375,45 @@ class InferenceEngine:
 
         if seed is not None:
             options["seed"] = seed
-            options["top_k"] = 1  # Strict sampling for determinism
+            # CRITICAL FIX: Removed options["top_k"] = 1
+            # We let the model sample (top_k default), controlled by the seed.
 
         payload = {
-            "model": self.state.model.id,
+            "model": self.ctx.st.model.id,
             "messages": messages,
             "stream": False,
             "options": options,
         }
 
-        if self.state.model.debug:
-            await self.emitter.emit_debug(f"OLLAMA DISPATCH: {base_url}/api/chat")
-            await self.emitter.emit_debug(f"PARAMS: temp={temperature}, seed={seed}")
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(
+                f"OLLAMA: {base_url}/api/chat (s:{seed} t:{temperature})"
+            )
 
         async with httpx.AsyncClient(
-            timeout=self.state.valves.generation_timeout
+            timeout=self.ctx.valves.generation_timeout
         ) as client:
-            response = await client.post(
-                f"{base_url}/api/chat",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            res_json = response.json()
-
+            r = await client.post(f"{base_url}/api/chat", json=payload)
+            r.raise_for_status()
+            res = r.json()
             return (
-                res_json.get("message", {}).get("content", ""),
-                res_json.get("eval_count", 0),
+                res.get("message", {}).get("content", ""),
+                res.get("eval_count", 0),
             )
 
     async def _infer_openai(
         self, messages: List[Dict], seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
-        """Direct call to OpenAI-compliant API."""
-
-        config = self.request.app.state.config
-        base_urls = getattr(config, "OPENAI_API_BASE_URLS", [])
-        api_keys = getattr(config, "OPENAI_API_KEYS", [])
-
-        base_url = base_urls[0] if base_urls else "https://api.openai.com/v1"
+        conf = self.ctx.request.app.state.config
+        base_urls = getattr(conf, "OPENAI_API_BASE_URLS", [])
+        api_keys = getattr(conf, "OPENAI_API_KEYS", [])
+        base_url = (
+            base_urls[0].rstrip("/") if base_urls else "https://api.openai.com/v1"
+        )
         api_key = api_keys[0] if api_keys else ""
-        base_url = base_url.rstrip("/")
 
         payload = {
-            "model": self.state.model.id,
+            "model": self.ctx.st.model.id,
             "messages": messages,
             "stream": False,
             "temperature": temperature,
@@ -425,46 +421,236 @@ class InferenceEngine:
 
         if seed is not None:
             payload["seed"] = seed
-            payload["top_p"] = 0.1  # Helps with determinism on OpenAI models
+            # CRITICAL FIX: Removed payload["top_p"] restrictions.
+            # Allowing full sampling controlled by seed.
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
 
-        if self.state.model.debug:
-            await self.emitter.emit_debug(
-                f"OPENAI DISPATCH: {base_url}/chat/completions"
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(
+                f"OPENAI: {base_url}/chat/completions (s:{seed} t:{temperature})"
             )
-            await self.emitter.emit_debug(f"PARAMS: temp={temperature}, seed={seed}")
 
         async with httpx.AsyncClient(
-            timeout=self.state.valves.generation_timeout
+            timeout=self.ctx.valves.generation_timeout
         ) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
+            r = await client.post(
+                f"{base_url}/chat/completions", json=payload, headers=headers
+            )
+            r.raise_for_status()
+            res = r.json()
+            return (
+                res["choices"][0]["message"].get("content", ""),
+                res.get("usage", {}).get("completion_tokens", 0),
+            )
+
+
+class ImageGenEngine:
+    """Handles image generation logic with direct context access."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    async def generate(self) -> str:
+        await self.ctx.em.emit_status("Generating Image..")
+        start = time.time()
+        eng = self.ctx.st.model.engine
+        E = self.ctx.config.Engines
+
+        try:
+            if eng == E.OPENAI:
+                await self._gen_openai()
+            elif eng == E.GEMINI:
+                await self._gen_gemini()
+            elif eng == E.FORGE:
+                await self._gen_forge()
+            else:
+                await self._gen_standard()
+
+            self.ctx.st.image_gen_time_int = int(time.time() - start)
+
+            if self.ctx.st.model.image_url:
+                await self.ctx.em.emit_message(
+                    f"![Generated Image]({self.ctx.st.model.image_url})"
+                )
+                return self.ctx.st.model.image_url
+            else:
+                raise Exception("No image URL returned")
+
+        except Exception as e:
+            raise e
+
+    # --- PAYLOAD BUILDERS ---
+
+    def _prepare_forge(self) -> dict:
+        p = self.ctx.st.model.copy()
+        p["prompt"] = p["enhanced_prompt"]
+        if not p.get("enable_hr"):
+            p["negative_prompt"] = ""
+        try:
+            w, h = map(int, p.get("size", "1024x1024").split("x"))
+            p["width"], p["height"] = w, h
+        except:
+            p["width"], p["height"] = 1024, 1024
+
+        for k in [
+            "trigger",
+            "id",
+            "engine",
+            "user_prompt",
+            "enhanced_prompt",
+            "quality_audit",
+            "persistent_vision_cache",
+            "debug",
+            "vision",
+            "language",
+            "b64_data",
+            "model",
+            "styles",
+            "size",
+            "aspect_ratio",
+            "llm_type",
+        ]:
+            p.pop(k, None)
+        return p
+
+    def _prepare_openai(self) -> dict:
+        m = self.ctx.st.model
+        return {
+            "model": m.model or "dall-e-3",
+            "prompt": m.enhanced_prompt,
+            "n": 1,
+            "size": m.size or "1024x1024",
+            "quality": "hd" if m.enable_hr else "standard",
+            "style": "natural" if m.style == "natural" else "vivid",
+            "response_format": "b64_json",
+            "user": self.ctx.user.id,
+        }
+
+    def _prepare_gemini(self) -> dict:
+        m = self.ctx.st.model
+        try:
+            w, h = map(int, (m.size or "1024x1024").split("x"))
+            rat = w / h
+            ar = (
+                "16:9"
+                if rat > 1.7
+                else (
+                    "4:3"
+                    if rat > 1.3
+                    else "9:16" if rat < 0.6 else "3:4" if rat < 0.8 else "1:1"
+                )
+            )
+        except:
+            ar = "1:1"
+
+        params = {
+            "sampleCount": m.get("n_iter", 1),
+            "negativePrompt": m.negative_prompt,
+            "aspectRatio": ar,
+            "safetySetting": "block_none",
+            "personGeneration": "allow_all",
+            "addWatermark": False,
+            "includeReasoning": False,
+            "outputOptions": {"mimeType": "image/png"},
+        }
+        if m.seed and m.seed != -1:
+            params["seed"] = m.seed
+
+        return {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
+
+    # --- HTTP HANDLERS ---
+
+    async def _gen_forge(self):
+        payload = self._prepare_forge()
+        conf = self.ctx.request.app.state.config
+        url = conf.AUTOMATIC1111_BASE_URL.rstrip("/")
+        auth = conf.AUTOMATIC1111_API_AUTH
+        headers = {}
+        if auth:
+            headers["Authorization"] = (
+                f"Basic {base64.b64encode(auth.encode()).decode()}"
+                if ":" in auth
+                else f"Bearer {auth}"
+            )
+
+        async with httpx.AsyncClient() as c:
+            r = await c.post(
+                f"{url}/sdapi/v1/txt2img",
                 json=payload,
                 headers=headers,
+                timeout=self.ctx.valves.generation_timeout,
             )
-            response.raise_for_status()
-            res_json = response.json()
+            r.raise_for_status()
+            res = r.json()
 
-            return (
-                res_json["choices"][0]["message"].get("content", ""),
-                res_json.get("usage", {}).get("completion_tokens", 0),
+        img = res["images"][0].split(",")[-1]
+        self.ctx.st.model.b64_data = img
+        self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+
+    async def _gen_openai(self):
+        payload = self._prepare_openai()
+        conf = self.ctx.request.app.state.config
+        headers = {
+            "Authorization": f"Bearer {conf.IMAGES_OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient() as c:
+            r = await c.post(
+                f"{conf.IMAGES_OPENAI_API_BASE_URL}/images/generations",
+                json=payload,
+                headers=headers,
+                timeout=self.ctx.valves.generation_timeout,
             )
+            r.raise_for_status()
+            img = r.json()["data"][0]["b64_json"]
+            self.ctx.st.model.b64_data = img
+            self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+
+    async def _gen_gemini(self):
+        payload = self._prepare_gemini()
+        conf = self.ctx.request.app.state.config
+        url = f"{conf.IMAGES_GEMINI_API_BASE_URL}/models/{self.ctx.st.model.model}:predict"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": conf.IMAGES_GEMINI_API_KEY,
+        }
+        async with httpx.AsyncClient() as c:
+            r = await c.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.ctx.valves.generation_timeout,
+            )
+            r.raise_for_status()
+            img = r.json()["predictions"][0]["bytesBase64Encoded"]
+            self.ctx.st.model.b64_data = img
+            self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+
+    async def _gen_standard(self):
+        form = CreateImageForm(
+            prompt=self.ctx.st.model.enhanced_prompt,
+            n=1,
+            size=self.ctx.st.model.size,
+            model=self.ctx.st.model.model,
+        )
+        gen = await image_generations(self.ctx.request, form, self.ctx.user)
+        if gen:
+            self.ctx.st.model.image_url = gen[0]["url"]
 
 
 class PromptParser:
-    """Regex based input parsing and parameter normalization."""
+    """Regex based input parsing directly modifying state model."""
 
-    def __init__(self, config: EasymageConfig):
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.config = ctx.config
 
-        self.config = config
-
-    def parse(self, user_prompt: str, model_state: Store):
-        """Deconstructs user input to extract triggers, technical params, and subject."""
-
+    def parse(self, user_prompt: str):
+        m_st = self.ctx.st.model  # Direct state access
         clean, neg = user_prompt, ""
 
         if " --no " in clean.lower():
@@ -472,9 +658,7 @@ class PromptParser:
 
         if " -- " in clean:
             prefix, subj = clean.split(" -- ", 1)
-
         else:
-            # FIX: Use lookaround to ensure flags are standalone tokens and not part of words like 'low-angle'
             pat = r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)'
             matches = list(re.finditer(pat, clean))
             idx = matches[-1].end() if matches else 0
@@ -485,38 +669,31 @@ class PromptParser:
         ).strip()
         rem_styles = re.sub(r"^[\s,]+|[\s,]+$", "", rem_styles)
 
-        # Parse key=value pairs
+        # Parse Pairs
         kv_pat = r'(\b\w+)=("([^"]*)"|(\S+))'
-
         for k, _, q, u in re.findall(kv_pat, prefix):
             k, v = k.lower(), (q if q else u).lower()
-
             try:
-
                 if k == "ge":
-                    model_state["engine"] = {
-                        "a": EasymageConfig.Engines.FORGE,
-                        "o": EasymageConfig.Engines.OPENAI,
-                        "g": EasymageConfig.Engines.GEMINI,
-                        "c": EasymageConfig.Engines.COMFY,
+                    m_st["engine"] = {
+                        "a": self.config.Engines.FORGE,
+                        "o": self.config.Engines.OPENAI,
+                        "g": self.config.Engines.GEMINI,
+                        "c": self.config.Engines.COMFY,
                     }.get(v, v)
-
                 elif k == "mdl":
-                    model_state["model"] = {
+                    m_st["model"] = {
                         "d3": "dall-e-3",
                         "d2": "dall-e-2",
                         "i3": "imagen-3.0-generate-001",
                         "i3f": "imagen-3.0-fast-generate-001",
                     }.get(v, v)
-
                 elif k == "stp":
-                    model_state["steps"] = int(v)
-
+                    m_st["steps"] = int(v)
                 elif k == "sz":
-                    model_state["size"] = v if "x" in str(v) else f"{v}x{v}"
-
+                    m_st["size"] = v if "x" in str(v) else f"{v}x{v}"
                 elif k == "ar":
-                    model_state["aspect_ratio"] = {
+                    m_st["aspect_ratio"] = {
                         "1": "1:1",
                         "16": "16:9",
                         "9": "9:16",
@@ -524,70 +701,44 @@ class PromptParser:
                         "3": "3:4",
                         "21": "21:9",
                     }.get(str(v), str(v))
-
                 elif k == "stl":
-                    model_state["style"] = {"v": "vivid", "n": "natural"}.get(v, v)
-
+                    m_st["style"] = {"v": "vivid", "n": "natural"}.get(v, v)
                 elif k == "sd":
-                    model_state["seed"] = int(v)
-
+                    m_st["seed"] = int(v)
                 elif k == "smp":
-                    model_state["sampler_name"] = self._norm(v, self.config.SAMPLER_MAP)
-
+                    m_st["sampler_name"] = self._norm(v, self.config.SAMPLER_MAP)
                 elif k == "sch":
-                    model_state["scheduler"] = self._norm(v, self.config.SCHEDULER_MAP)
-
-                # elif k == "n":
-                #     model_state["n_iter"] = int(v)
-
-                # elif k == "b":
-                #     model_state["batch_size"] = int(v)
-
+                    m_st["scheduler"] = self._norm(v, self.config.SCHEDULER_MAP)
                 elif k == "cs":
-                    model_state["cfg_scale"] = float(v)
-
+                    m_st["cfg_scale"] = float(v)
                 elif k == "dcs":
-                    model_state["distilled_cfg_scale"], model_state["cfg_scale"] = (
-                        float(v),
-                        1.0,
-                    )
-
+                    m_st["distilled_cfg_scale"], m_st["cfg_scale"] = float(v), 1.0
                 elif k in ["hr", "hru", "hdcs", "dns"]:
-                    model_state["enable_hr"] = True
-
+                    m_st["enable_hr"] = True
                     if k == "hr":
-                        model_state["hr_scale"] = float(v)
-
+                        m_st["hr_scale"] = float(v)
                     elif k == "hru":
-                        model_state["hr_upscaler"] = v
-
+                        m_st["hr_upscaler"] = v
                     elif k == "hdcs":
-                        model_state["hr_distilled_cfg"] = float(v)
-
+                        m_st["hr_distilled_cfg"] = float(v)
                     elif k == "dns":
-                        model_state["denoising_strength"] = float(v)
-
+                        m_st["denoising_strength"] = float(v)
             except ValueError:
                 continue
 
-        # Parse flags like +d, -p
-        # FIX: Apply the same lookaround logic to flag extraction loop
+        # Parse Flags
         for flag in re.findall(r"(?<!\w)([+-][dpah])(?!\w)", prefix):
             v, char = flag[0] == "+", flag[1]
-
             if char == "d":
-                model_state["debug"] = v
-
+                m_st["debug"] = v
             elif char == "p":
-                model_state["enhanced_prompt"] = v
-
+                m_st["enhanced_prompt"] = v
             elif char == "a":
-                model_state["quality_audit"] = v
-
+                m_st["quality_audit"] = v
             elif char == "h":
-                model_state["enable_hr"] = v
+                m_st["enable_hr"] = v
 
-        model_state.update(
+        m_st.update(
             {
                 "user_prompt": subj.strip(),
                 "negative_prompt": neg.strip(),
@@ -596,8 +747,6 @@ class PromptParser:
         )
 
     def _norm(self, name, mapping):
-        """Helper to normalize technical names into engine-compatible strings."""
-
         n = (
             name.lower()
             .replace("_", "")
@@ -605,7 +754,6 @@ class PromptParser:
             .replace("-", "")
             .replace("++", "")
         )
-
         return mapping.get(
             n, name.capitalize() if mapping is self.config.SCHEDULER_MAP else name
         )
@@ -622,9 +770,7 @@ class Filter:
         persistent_vision_cache: bool = Field(default=False)
         debug: bool = Field(default=False)
         model: Optional[str] = Field(default=None)
-        generation_timeout: int = Field(
-            default=120, description="HTTP Timeout for Image Gen (seconds)"
-        )
+        generation_timeout: int = Field(default=120)
         steps: int = 20
         size: str = "1024x1024"
         aspect_ratio: str = "1:1"
@@ -634,15 +780,12 @@ class Filter:
         sampler_name: str = "Euler"
         scheduler: str = "Simple"
         enable_hr: bool = False
-        # n_iter: int = 1
-        # batch_size: int = 1
         hr_scale: float = 2.0
         hr_upscaler: str = "Latent"
         hr_distilled_cfg: float = 3.5
         denoising_strength: float = 0.45
 
     def __init__(self):
-
         self.valves = self.Valves()
         self.config = EasymageConfig()
 
@@ -653,72 +796,55 @@ class Filter:
         __request__=None,
         __event_emitter__=None,
     ) -> dict:
-        """Core entry point for the filter middleware."""
+        """Entry Point. Acts as the Context Container for all sub-engines."""
 
         trigger_data = self._check_input(body)
-
         if not trigger_data:
             return body
 
         trigger, raw_p = trigger_data
 
-        # Initialize internal state and services
-        self.st, self.em = EasymageState(self.valves), EmitterService(__event_emitter__)
-        self.st.model.trigger, self.request, self.user = (
-            trigger,
-            __request__,
-            UserModel(**__user__),
-        )
+        # 1. SETUP CONTEXT (The Filter itself is the Context)
+        self.request = __request__
+        self.user = UserModel(**__user__)
+        self.st = EasymageState(self.valves)
+        self.em = EmitterService(__event_emitter__)
+        self.st.model.trigger = trigger
 
-        # --- NEW DISCOVERY LOGIC ---
-        # Detect Engine Type from Request Metadata for correct Dispatcher selection
+        # Metadata Discovery
         try:
             metadata = body.get("metadata", {})
-            # Look for model info in standard OWUI metadata structure
-            model_info = metadata.get("model", {})
-            # Default to 'ollama' if unknown, as it's the safest local assumption
-            self.st.model.llm_type = model_info.get("owned_by", "ollama")
-        except Exception:
+            self.st.model.llm_type = metadata.get("model", {}).get("owned_by", "ollama")
+        except:
             self.st.model.llm_type = "ollama"
-        # ---------------------------
 
-        self.inf, self.parser = InferenceEngine(
-            self.request, self.user, self.st, self.em
-        ), PromptParser(self.config)
+        # 2. INITIALIZE WORKERS (Passing 'self' as Context)
+        # Note: DebugService comes first to handle early errors if needed
+        self.debug = DebugService(self)
+        self.inf = InferenceEngine(self)
+        self.img_gen = ImageGenEngine(self)
+        self.parser = PromptParser(self)
 
         try:
-            # Process prompt and configuration
+            # 3. CONTEXT POPULATION & LOGIC
             await self._setup_context(body, raw_p)
 
             if self.st.model.debug:
-                await self.em.emit_message(
-                    f"```json\nDEBUG MODEL: {json.dumps(self.st.model, indent=2)}\n```\n"
-                )
-                await self.em.emit_message(
-                    f"```json\nDEBUG VALVES: {json.dumps(self.valves.model_dump(), indent=2)}\n```\n"
-                )
+                self.debug.log(f"STATE: {json.dumps(self.st.model, indent=2)}")
 
-            # Workflow execution based on trigger
-            if self.st.model.trigger == "imgx":
-                await self.em.emit_message(self.st.model.enhanced_prompt)
-                await self._output_status_only()
-
-            else:
-                await self._generate_image()
+            # 4. EXECUTION
+            if self.st.model.trigger == "img":
+                await self.img_gen.generate()
                 await self._vision_audit()
                 await self._output_delivery()
 
         except Exception as e:
-            await self._err(e)
+            await self.debug.error(e)
 
-        # Final state dump for console monitoring
-        self._dmp()
-
+        # self.debug.dump(self.st.model)
         return self._suppress_output(body)
 
     async def _setup_context(self, body: dict, user_prompt: str):
-        """Prepares metadata, performs language detection, and enhances prompt via LLM."""
-
         if "features" in body:
             body["features"]["web_search"] = False
 
@@ -728,42 +854,38 @@ class Filter:
             {k: v for k, v in self.valves.model_dump().items() if v is not None}
         )
 
-        # 1. Parse input to override defaults with user choices
-        self.parser.parse(user_prompt, self.st.model)
+        # 1. Parse Input
+        self.parser.parse(user_prompt)
 
         if self.st.model.trigger == "img":
             await self._check_vision_capability()
 
-        # 2. Language Detection
+        # 2. Language Detect (Deterministic)
         dl = await self.inf._infer(
             task="Language Detection",
             data={
                 "user": self.st.model.user_prompt,
                 "system": "Return ONLY the language name of the user text.",
             },
+            creative_mode=False,
         )
         self.st.model.language = dl if dl else "English"
 
-        # 3. Decide strategy for negative prompt handling
+        # 3. Prompt Enhancement (Creative Mode)
         E = self.config.Engines
         native_support = (self.st.model.engine == E.GEMINI) or (
             self.st.model.engine == E.FORGE and self.st.model.enable_hr
         )
         use_llm_neg = (self.st.model.trigger == "imgx") or (not native_support)
 
-        # 4. LLM-based Prompt Enhancement
         if self.st.model.enhanced_prompt or self.st.model.trigger == "imgx":
-
             instructions = [
                 self.config.PROMPT_ENHANCE_BASE.format(lang=self.st.model.language),
                 self.config.PROMPT_ENHANCE_RULES,
             ]
-
             user_content = f"EXPAND THIS PROMPT: {self.st.model.user_prompt}"
-
             if self.st.model.styles:
                 user_content += f"\nAPPLY THESE STYLES: {self.st.model.styles}"
-
             if self.st.model.negative_prompt and use_llm_neg:
                 user_content += f"\nAVOID THESE ELEMENTS AT ALL COSTS: {self.st.model.negative_prompt}"
                 instructions.append(
@@ -772,21 +894,14 @@ class Filter:
                     )
                 )
 
-            # self._dbg("SYSTEM PROMPT\n" + "".join(instructions))
-            # self._dbg(f"USER PROMPT: {user_content}")
-
             enh = await self.inf._infer(
                 task="Prompt Enhancing",
-                data={
-                    "system": "\n".join(instructions),
-                    "user": user_content,
-                },
-                creative_mode=True,  # <--- CRUCIAL FIX
+                data={"system": "\n".join(instructions), "user": user_content},
+                creative_mode=True,
             )
             self.st.model.enhanced_prompt = (
                 re.sub(r"['\"]", "", enh) if enh else self.st.model.user_prompt
             )
-
         else:
             self.st.model.enhanced_prompt = re.sub(
                 r"['\"]", "", self.st.model.user_prompt
@@ -794,242 +909,9 @@ class Filter:
 
         self._validate_and_normalize()
 
-    async def _generate_image(self):
-        """Dispatcher for triggering the correct generation backend."""
-
-        await self.em.emit_status("Generating Image..")
-        start = time.time()
-        eng = self.st.model.engine
-        E = self.config.Engines
-
-        try:
-
-            if eng == E.OPENAI:
-                await self._gen_openai()
-
-            elif eng == E.GEMINI:
-                await self._gen_gemini()
-
-            elif eng == E.FORGE:
-                await self._gen_forge()
-
-            else:
-                await self._gen_standard()
-
-            self.st.image_gen_time_int = int(time.time() - start)
-
-            if self.st.model.image_url:
-                await self.em.emit_message(
-                    f"![Generated Image]({self.st.model.image_url})"
-                )
-
-            else:
-                raise Exception("No image URL returned")
-
-        except Exception as e:
-            await self._err(f"Gen Failed ({eng}): {e}")
-
-    # --- PAYLOAD BUILDERS (SoC) ---
-
-    def _prepare_payload_forge(self) -> dict:
-        """Constructs the JSON payload for Automatic1111/Forge."""
-
-        p = self.st.model.copy()
-        p["prompt"] = p["enhanced_prompt"]
-
-        if not p.get("enable_hr"):
-            p["negative_prompt"] = ""
-
-        try:
-            w, h = map(int, p.get("size", "1024x1024").split("x"))
-            p["width"], p["height"] = w, h
-
-        except:
-            p["width"], p["height"] = 1024, 1024
-
-        exclude = [
-            "trigger",
-            "id",
-            "engine",
-            "user_prompt",
-            "enhanced_prompt",
-            "quality_audit",
-            "persistent_vision_cache",
-            "debug",
-            "vision",
-            "language",
-            "b64_data",
-            "model",
-            "styles",
-            "size",
-            "aspect_ratio",
-        ]
-
-        for k in exclude:
-            p.pop(k, None)
-
-        return p
-
-    def _prepare_payload_openai(self) -> dict:
-        """Constructs the JSON payload for OpenAI DALL-E API."""
-
-        return {
-            "model": self.st.model.model or "dall-e-3",
-            "prompt": self.st.model.enhanced_prompt,
-            "n": 1,
-            "size": self.st.model.size or "1024x1024",
-            "quality": "hd" if self.st.model.enable_hr else "standard",
-            "style": "natural" if self.st.model.style == "natural" else "vivid",
-            "response_format": "b64_json",
-            "user": self.user.id,
-        }
-
-    def _prepare_payload_gemini(self) -> dict:
-        """Constructs the JSON payload for Google Gemini Imagen API."""
-
-        try:
-            w, h = map(int, (self.st.model.size or "1024x1024").split("x"))
-            rat = w / h
-            ar = (
-                "16:9"
-                if rat > 1.7
-                else (
-                    "4:3"
-                    if rat > 1.3
-                    else "9:16" if rat < 0.6 else "3:4" if rat < 0.8 else "1:1"
-                )
-            )
-
-        except:
-            ar = "1:1"
-
-        params = {
-            "sampleCount": self.st.model.get("n_iter", 1),
-            "negativePrompt": self.st.model.negative_prompt,
-            "aspectRatio": ar,
-            "safetySetting": "block_none",
-            "personGeneration": "allow_all",
-            "addWatermark": False,
-            "includeReasoning": False,
-            "outputOptions": {"mimeType": "image/png"},
-        }
-
-        if self.st.model.seed and self.st.model.seed != -1:
-            params["seed"] = self.st.model.seed
-
-        return {
-            "instances": [{"prompt": self.st.model.enhanced_prompt}],
-            "parameters": params,
-        }
-
-    # --- HTTP HANDLERS ---
-
-    async def _gen_forge(self):
-        """Executes the HTTP request to a local or remote Forge backend."""
-
-        payload = self._prepare_payload_forge()
-        conf = self.request.app.state.config
-        url = conf.AUTOMATIC1111_BASE_URL.rstrip("/")
-        auth = conf.AUTOMATIC1111_API_AUTH
-        headers = (
-            {
-                "Authorization": (
-                    f"Basic {base64.b64encode(auth.encode()).decode()}"
-                    if auth and ":" in auth
-                    else f"Bearer {auth}"
-                )
-            }
-            if auth
-            else {}
-        )
-
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                f"{url}/sdapi/v1/txt2img",
-                json=payload,
-                headers=headers,
-                timeout=self.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            res = r.json()
-
-        img = res["images"][0].split(",")[-1]
-        self.st.model.b64_data, self.st.model.image_url = (
-            img,
-            f"data:image/png;base64,{img}",
-        )
-
-    async def _gen_openai(self):
-        """Executes the HTTP request to the OpenAI image generation endpoint."""
-
-        payload = self._prepare_payload_openai()
-        conf = self.request.app.state.config
-        headers = {
-            "Authorization": f"Bearer {conf.IMAGES_OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                f"{conf.IMAGES_OPENAI_API_BASE_URL}/images/generations",
-                json=payload,
-                headers=headers,
-                timeout=self.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            img = r.json()["data"][0]["b64_json"]
-
-            self.st.model.b64_data, self.st.model.image_url = (
-                img,
-                f"data:image/png;base64,{img}",
-            )
-
-    async def _gen_gemini(self):
-        """Executes the HTTP request to the Google Gemini predict endpoint."""
-
-        payload = self._prepare_payload_gemini()
-        conf = self.request.app.state.config
-        url = f"{conf.IMAGES_GEMINI_API_BASE_URL}/models/{self.st.model.model}:predict"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": conf.IMAGES_GEMINI_API_KEY,
-        }
-
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            img = r.json()["predictions"][0]["bytesBase64Encoded"]
-
-            self.st.model.b64_data, self.st.model.image_url = (
-                img,
-                f"data:image/png;base64,{img}",
-            )
-
-    async def _gen_standard(self):
-        """Uses the built-in Open WebUI image router as a fallback backend."""
-
-        form = CreateImageForm(
-            prompt=self.st.model.enhanced_prompt,
-            n=1,
-            size=self.st.model.size,
-            model=self.st.model.model,
-        )
-        gen = await image_generations(self.request, form, self.user)
-
-        if gen:
-            self.st.model.image_url = gen[0]["url"]
-
     async def _vision_audit(self):
-        """Analyzes the generated image for quality and alignment using Vision LLM."""
-
         if not self.st.model.quality_audit or not self.st.model.vision:
             return
-
         await self.em.emit_status("Visual Quality Audit..", False)
 
         url = (
@@ -1050,10 +932,10 @@ class Filter:
                 ),
                 "user": {"image_url": url, "text": "Analyze image quality."},
             },
+            creative_mode=False,
         )
 
         m = re.search(r"SCORE:\s*(\d+)", raw_v, re.IGNORECASE)
-
         if m:
             v = int(m.group(1))
             self.st.quality_audit_results.update(
@@ -1071,31 +953,24 @@ class Filter:
                     ),
                 }
             )
-
         else:
             self.st.quality_audit_results["critique"] = raw_v
 
     async def _output_delivery(self):
-        """Final output step: emits citations, metrics, and summary to the UI."""
-
         total = int(time.time() - self.st.start_time)
         cit = self.st.model.enhanced_prompt.replace("*", "")
-
         if self.st.model.styles:
             cit += f"\n\nSTYLES\n{self.st.model.styles}"
-
         if self.st.model.negative_prompt:
             cit += f"\n\nNEGATIVE\n{self.st.model.negative_prompt}"
 
         await self.em.emit_citation("🚀 PROMPT", cit, "1", "p")
 
         if self.st.model.quality_audit:
-
             if not self.st.model.vision:
                 await self.em.emit_citation(
                     "‼️NO VISION", f"Model {self.st.model.id} lacks vision.", "2", "b"
                 )
-
             elif self.st.quality_audit_results["critique"]:
                 await self.em.emit_citation(
                     f"{self.st.quality_audit_results['emoji']} SCORE: {self.st.quality_audit_results['score']}%",
@@ -1122,8 +997,6 @@ class Filter:
         )
 
     async def _output_status_only(self):
-        """Minimal output emission when no image generation is performed."""
-
         tps = (
             self.st.cumulative_tokens / self.st.cumulative_elapsed_time
             if self.st.cumulative_elapsed_time > 0
@@ -1135,26 +1008,18 @@ class Filter:
         )
 
     def _apply_global_settings(self):
-        """Fetches and normalizes initial image settings from OWUI global state."""
-
         conf = getattr(self.request.app.state.config, "_state", {})
         eng = str(self._unwrap(conf.get("IMAGE_GENERATION_ENGINE", "none"))).lower()
         sets = {"engine": eng}
-
         for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
             sets[self._clean_key(k, eng)] = self._unwrap(conf.get(k))
-
         for k in self.config.ENGINE_MAP.get(eng, []):
             val = self._unwrap(conf.get(k))
-
             if val is not None:
                 sets[self._clean_key(k, eng)] = val
-
         self.st.model.update(sets)
 
     def _validate_and_normalize(self):
-        """Sanitizes model names and dimensions based on engine-specific constraints."""
-
         eng, mdl = (
             self.st.model.get("engine"),
             str(self.st.model.get("model", "")).lower(),
@@ -1163,14 +1028,12 @@ class Filter:
 
         if eng == E.OPENAI and "dall-e" not in mdl:
             self.st.model["model"] = "dall-e-3"
-
         elif eng == E.GEMINI and "imagen" not in mdl:
             self.st.model["model"] = "imagen-3.0-fast-generate-001"
 
         sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
             "aspect_ratio"
         )
-
         try:
             w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
             r = (
@@ -1178,69 +1041,51 @@ class Filter:
                 if ar and ":" in str(ar)
                 else w / h
             )
-
         except:
             w, h, r = 1024, 1024, 1.0
 
         if eng == E.OPENAI or "dall-e" in mdl:
-
             if r > 1.2:
                 self.st.model["size"], self.st.model["aspect_ratio"] = (
                     "1792x1024",
                     "16:9",
                 )
-
             elif r < 0.8:
                 self.st.model["size"], self.st.model["aspect_ratio"] = (
                     "1024x1792",
                     "9:16",
                 )
-
             else:
                 self.st.model["size"], self.st.model["aspect_ratio"] = (
                     "1024x1024",
                     "1:1",
                 )
-
         else:
             self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
 
     def _check_input(self, body: dict) -> Optional[Tuple[str, str]]:
-        """Scans incoming chat body for active filter trigger commands."""
-
         if body.get("is_probe"):
             return None
-
         msgs = body.get("messages", [])
-
         if not msgs:
             return None
-
         last = msgs[-1]["content"]
         txt = last[0].get("text", "") if isinstance(last, list) else last
         m = re.match(r"^(img|imgx)\s", txt, re.IGNORECASE)
-
         return (m.group(1).lower(), txt[m.end() :].strip()) if m else None
 
     async def _check_vision_capability(self):
-        """Probes model's ability to process image inputs via diagnostic test."""
-
         if self.st.model.debug or not self.st.valves.persistent_vision_cache:
-
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
 
         if os.path.exists(CAPABILITY_CACHE_PATH):
-
             try:
-
                 with open(CAPABILITY_CACHE_PATH, "r") as f:
                     self.st.vision_cache = json.load(f)
-
                     if self.st.model.id in self.st.vision_cache:
                         self.st.model.vision = self.st.vision_cache[self.st.model.id]
                         return
-
             except:
                 pass
 
@@ -1254,40 +1099,31 @@ class Filter:
                     "text": "Analyze image. Reply 1 if black.",
                 },
             },
+            creative_mode=False,
         )
         has_v = "1" in res
         self.st.model.vision, self.st.vision_cache[self.st.model.id] = has_v, has_v
-
         try:
             os.makedirs(os.path.dirname(CAPABILITY_CACHE_PATH), exist_ok=True)
-
             with open(CAPABILITY_CACHE_PATH, "w") as f:
                 json.dump(self.st.vision_cache, f)
-
         except:
             pass
 
     def _unwrap(self, obj):
-        """Utility for recursively extracting values from complex configuration objects."""
-
         if hasattr(obj, "value"):
             return self._unwrap(obj.value)
-
         if isinstance(obj, dict):
             return {k: self._unwrap(v) for k, v in obj.items()}
-
         return obj
 
     def _clean_key(self, key, eng):
-        """Normalizes global app state keys to match internal state dictionary keys."""
-
         k = (
             key.upper()
             .replace("IMAGE_GENERATION_", "")
             .replace("IMAGE_", "")
             .replace("ENABLE_IMAGE_", "ENABLE_")
         )
-
         return (
             k.replace(f"{eng.upper()}_API_", "")
             .replace(f"{eng.upper()}_", "")
@@ -1296,33 +1132,32 @@ class Filter:
         )
 
     def _suppress_output(self, body: dict) -> dict:
-        """Modifies the request payload to halt default LLM text response generation."""
+        """Cache-friendly suppression: preserves prefix to reuse KV cache."""
+        # Segnaliamo all'outlet che deve pulire l'output residuo
 
-        body["messages"] = [{"role": "assistant", "content": ""}]
-        body["max_tokens"], body["stop"] = 1, [chr(i) for i in range(128)]
+        self.st.easymage_skip = True
+
+        # NON svuotiamo body["messages"]. Manteniamo il prefisso originale.
+        # Questo permette a Ollama di rispondere in <100ms usando la cache.
+        body["max_tokens"] = 1
+        body["stream"] = False
+
+        # Forza il backend a fermarsi immediatamente
+        if self.st.model.llm_type == "ollama":
+            body["options"] = {
+                "num_predict": 1,
+                "temperature": 0.0,
+                "num_ctx": 4096,  # Deve corrispondere a quello usato in precedenza
+            }
 
         return body
 
-    def _dbg(self, msg: str):
-        """Prints diagnostic logs to standard error for Docker logs visibility."""
+    async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+        """Cleans up the residual token generated by the suppressed backend call."""
+        if self.st.easymage_skip == True:
+            if "messages" in body and len(body["messages"]) > 0:
+                body["messages"][-1]["content"] = self.st.model.enhanced_prompt
+            await self._output_status_only()
+            return body
 
-        if self.valves.debug:
-            print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
-
-    async def _err(self, e: Any):
-        """Logs exceptions and notifies the chat UI of critical filter errors."""
-
-        self._dbg(f"ERROR: {e}")
-        await self.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
-
-    def _dmp(self):
-        """Performs a full state serialization and dump to stderr for debugging."""
-
-        if not self.valves.debug:
-            return
-
-        print(
-            f"{'—'*40}\n📦 EASYMAGE DUMP\n{json.dumps(self.st.model, indent=2)}\n{'—'*40}",
-            file=sys.stderr,
-            flush=True,
-        )
+        return body
