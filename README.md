@@ -1,17 +1,18 @@
-# 🚀 Easymage v0.8.12: Easy Image Generator & Prompt Engineer
+# 🚀 Easymage v0.8.15: Easy Image Generator & Prompt Engineer
 
 ## Project Identity & Smart Pipeline
 
 Easymage is a professional-grade filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img ` or `imgx ` to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
-This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.8.12 introduces a high-fidelity **Selective Negation Strategy**, ensuring that your negative requirements are executed with precision regardless of the chosen backend.
+This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.8.15 introduces a high-fidelity **Selective Negation Strategy**, ensuring that your negative requirements are executed with precision regardless of the chosen backend.
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Filter](https://img.shields.io/badge/Open%20WebUI-Filter-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
-### 🆕 What's New in v0.8.12 (vs v0.6.3)
+### 🆕 What's New in v0.8.15 (vs v0.6.3)
 
+-   **Engine-Level Determinism**: Custom dispatcher for Ollama/OpenAI that bypasses OWUI's native completion bugs, ensuring 1:1 seed reproducibility.
 -   **Native Direct Routing**: Bypasses standard internal APIs using direct HTTPX connections for A1111, OpenAI, and Gemini.
 -   **Selective Negation Strategy**: Smart logic chooses between native API or LLM integration based on engine support and Hires Fix status.
 -   **Universal CLI Syntax**: Full control via `sz=`, `stp=`, `sd=`, `dcs=`, `hdcs=`, and specialized shortcuts.
@@ -186,7 +187,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 
 One of the most complex challenges in AI image generation is "negation" (telling the AI what *not* to include). Most engines are designed to follow positive instructions and often struggle with negative ones unless they are formatted specifically for their architecture.
 
-Easymage v0.8.12 introduces a **Selective Negation Strategy** that automatically chooses the best method to handle your `--no ` requirements.
+Easymage, from v0.8.12, introduces a **Selective Negation Strategy** that automatically chooses the best method to handle your `--no ` requirements.
 
 #### 1. Native API Handling (High Fidelity)
 If the generation engine has a dedicated technical field for negative prompts, Easymage passes your exclusions directly to the API. This provides a "surgical" removal of elements without affecting the creative description of the main subject.
