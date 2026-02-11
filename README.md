@@ -1,320 +1,381 @@
+# 🚀 Easymage v0.8.12: Easy Image Generator & Prompt Engineer
 
-# 🚀 Easymage v0.8.1: Easy Image Generator & Prompt Engineer
+## Project Identity & Smart Pipeline
 
-Easymage is a professional-grade filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img ` or `imgx ` to any message, you activate an advanced pipeline that handles everything from prompt engineering to multi-engine generation and post-creation technical analysis.
+Easymage is a professional-grade filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img ` or `imgx ` to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
-This filter acts as an intelligent router, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `negative prompts` that are not available through the standard Open WebUI interface.
+This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.8.12 introduces a high-fidelity **Selective Negation Strategy**, ensuring that your negative requirements are executed with precision regardless of the chosen backend.
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Filter](https://img.shields.io/badge/Open%20WebUI-Filter-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
+### 🆕 What's New in v0.8.12 (vs v0.6.3)
+
+-   **Native Direct Routing**: Bypasses standard internal APIs using direct HTTPX connections for A1111, OpenAI, and Gemini.
+-   **Selective Negation Strategy**: Smart logic chooses between native API or LLM integration based on engine support and Hires Fix status.
+-   **Universal CLI Syntax**: Full control via `sz=`, `stp=`, `sd=`, `dcs=`, `hdcs=`, and specialized shortcuts.
+-   **IMGX Text Mode**: Extract enhanced prompts as natural text without generating images.
+-   **Next-Gen Model Support**: Native parameters for Flux and SD3 (Distilled CFG and Hires Distilled CFG).
+-   **Dual-Layer Negative Prompts**: Automatic fallback to AVOID protocol for limited engines (OpenAI/Comfy).
+-   **High-Fidelity Citations**: Detailed tracking of original user styles/negations vs final enhanced prompt.
+-   **Advanced High-Res Fix**: Deep integration for Forge and OpenAI HD quality mapping.
+-   **Performance Throughput**: Real-time tracking of LLM tokens, generation latency, and Tokens/sec.
+-   **Refined Error Interception**: Unified handling for backend timeouts and API failures via Docker logging.
+
 ---
 
 ### ✨ Key Features
 
-*   **Intelligent Multi-Engine Router**: Native support for `Forge (A1111)`, `OpenAI (DALL-E)`, and `Gemini (Imagen)`, with a standard fallback for `ComfyUI`. Easymage translates universal commands into the specific "dialect" of each API.
-*   **Automated Prompt Engineering**: Expands simple ideas into high-fidelity technical prompts, enriching them with details on lighting, camera angles, textures, and artistic styles.
-*   **Vision Quality Audit (QC)**: Provides a real-time technical critique of the generated image using Vision models, assigning a numerical score (0-100%) and an analysis of defects.
-*   **Universal Syntax**: A single command set (`img ...`) allows you to control advanced parameters across different backends without needing to learn individual APIs.
-*   **Performance Analytics**: Tracks generation latency, total execution time, and precise throughput (Tokens/s).
+*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for `Forge (A1111)`, `OpenAI (DALL-E-3 / DALL-E-2)`, and `Gemini (Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
+*   **Selective Negation Strategy (New)**: A smart logic core that determines how to handle negative prompts. It automatically decides whether to use native API fields (for Gemini or Forge with Hires Fix) or to "inject" the negation into the LLM-enhanced description (for OpenAI and ComfyUI), ensuring perfect visual results.
+*   **Automated Prompt Engineering**: Expands minimalist user input into high-fidelity technical prompts. It dynamically incorporates details about lighting, camera angles, textures, environment, and artistic style based on your requirements.
+*   **Vision Quality Audit (QC)**: Provides a real-time technical critique of the generated image using Vision LLMs. It assigns a numerical score (0-100%) and evaluates specific artifacts like noise, grain, melting, and aliasing (jaggies).
+*   **Universal CLI Syntax**: Control every generation aspect with a single syntax (`sz=`, `stp=`, `ar=`, etc.). No more switching between different interfaces or learning complex API structures.
+*   **Deep Performance Analytics**: Every generation tracks precise metrics, including total execution time, image generation latency, and LLM throughput (Tokens per second).
 
 ---
 
+### 🧠 The Three-Step Pipeline
+
+1.  **Expansion & Optimization**: The system detects the language, identifies your requested styles and exclusions, and uses an LLM to build a professional prompt.
+2.  **Smart Generation**: The request is routed to the chosen engine. If the engine supports native parameters (like Seed or Negative Prompt), Easymage passes them directly via HTTPX; otherwise, it handles the logic through text fallback.
+3.  **Visual Verification**: If a Vision-capable model is available, the final image is audited for prompt alignment and technical integrity.
+
+---
+## Universal CLI (Command Line Interface)
+
+
 ### 💡 Core Usage & Syntax
 
-Easymage is activated with two main commands, followed by a flexible combination of parameters, styles, and prompts.
+Easymage is activated by prepending a trigger command to your message. It parses technical instructions, stylistic choices, and the subject in a single pass.
 
 #### Base Commands
-*   `img [prompt]`: **Full Generation Mode**. Triggers the entire pipeline: prompt enhancement, image generation, and quality audit.
-*   `imgx [prompt]`: **Text-Only Mode**. Executes only the prompt enhancement and returns it as text, without generating an image. Useful for crafting prompts to use elsewhere.
+*   `img [prompt]`: **Full Generation Mode**. Triggers the entire pipeline: prompt enhancement, multi-engine generation, and visual quality audit.
+*   `imgx [prompt]`: **Text-Only / Preview Mode**. Executes language detection and prompt enhancement only. It returns the final expanded prompt as text, perfectly formatted for manual use or debugging.
 
 #### Command Structure
-The general format is `img [parameters] [flags] [styles] -- [subject] --no [negative prompt]`.
+The universal format is:
+`img [ flags ] [ parameters ] [ styles -- ] [ subject] [ --no negative prompt ]`
 
 | Part | Example | Description |
 | :--- | :--- | :--- |
-| **Parameters** | `sz=1024x1024 stp=30` | `key=value` pairs to control the engine (size, steps, etc.). |
-| **Flags** | `+h -a` | Toggles for features like **H**igh-Res (`+h`) or **A**udit (`-a`). |
-| **Styles** | `cinematic, dark fantasy` | Stylistic keywords that are added to the subject prompt. |
-| **Subject** | `-- a red car` | The main subject of your image. **The `-- ` separator is required if using styles or parameters.** |
-| **Negative Prompt**| `--no blurry, ugly` | Elements to exclude from the image. The `--no ` is the separator. |
+| **Parameters** | `sz=1024x1024 stp=30` | `key=value` pairs to control the generation (size, steps, etc.). Text values with spaces (e.g. sampler names) must be enclosed in double quotes: `smp="Euler a"`. |
+| **Flags** | `+h -a` | Single-character toggles to enable (`+`) or disable (`-`) features. |
+| **Styles** | `neon, 8k, macro` | Stylistic keywords that steer the LLM enhancer. |
+|  **Subject**  | `-- a lonely robot` | The main content of your image. The `-- ` separator is **mandatory only if you are specifying Styles** to distinguish them from the Subject. |
+| **Negative Prompt**| `--no people, blur` | Elements to exclude. The `--no ` separator triggers the logic fallback system. |
+
+> 💡 **Smart Parsing**: If you only use technical parameters (like `sz=1024` or `+h`), Easymage automatically identifies the Subject as everything following the last parameter. You only need the `-- ` separator when you want to provide descriptive Styles (e.g., `img sz=1024 cinematic, low-angle -- a giant tree`).
 
 ---
 
 ### ⚙️ Command Line Parameters
 
-Use these `key=value` pairs to control the generation process.
+These parameters allow you to override backend settings directly from the chat.
 
 | Parameter | Example | Description | Supported Engines |
 | :--- | :--- | :--- | :--- |
-| `ge` | `ge=o` | **G**eneration **E**ngine. Selects the backend. | All |
-| `mdl` | `mdl=dall-e-3`| **M**o**d**e**l**. Specifies the model/checkpoint. | All |
-| `sz` | `sz=1792x1024`| **S**i**z**e. Image dimensions in pixels. | All |
-| `ar` | `ar=16:9` | **A**spect **R**atio. Sets the aspect ratio. | All |
-| `stp` | `stp=25` | **St**e**p**s. Number of sampling steps. | A1111 |
-| `sd` | `sd=12345` | **S**ee**d**. Value for reproducibility. | A1111, Gemini |
-| `cs` | `cs=7.5` | **C**FG **S**cale. How strictly the prompt should be followed. | A1111 |
-| `stl` | `stl=n` | **St**y**l**e. `v` (vivid) or `n` (natural). | OpenAI |
-| `n` | `n=4` | **N**umber. How many images to generate. | A1111, Gemini |
+| `ge` | `ge=o` | **G**eneration **E**ngine. Selects the generation backend. | All |
+| `mdl` | `mdl=d3` | **M**o**d**e**l**. Selects a specific checkpoint or API model version. | All |
+| `sz` | `sz=800` | **S**i**z**e. Accepts `WxH` or a single value `N` (auto-converted to square `NxN`). Dimensions are then normalized based on engine constraints and the `ar` parameter.| All |
+| `ar` | `ar=16:9` | **A**spect **R**atio. Automatically calculates size based on ratio. | All |
+| `stp` | `stp=25` | **St**e**p**s. Number of sampling iterations. | A1111 / Forge |
+| `sd` | `sd=42` | **S**ee**d**. Numeric value for reproducible generations. | A1111, Gemini |
+| `cs` | `cs=7.0` | **C**FG **S**cale. Classifier-Free Guidance intensity. | A1111, Comfy |
+| `dcs` | `dcs=3.5` | **D**istilled **C**FG **S**cale. Specialized for Flux/SD3 models. | A1111 / Forge |
+| `stl` | `stl=v` | **St**y**l**e. Choose between `v` (vivid) or `n` (natural). | OpenAI |
+| `smp` | `smp=d2s` | **S**a**m**p**ler**. Selects the sampling algorithm. | A1111 / Forge |
+| `sch` | `sch=k` | **Sch**eduler. Selects the noise schedule type. | A1111 / Forge |
+| `hr` | `hr=2.0` | **H**igh-**R**es Scale. Enables Hires Fix and sets the multiplier. | A1111 / Forge |
+| `hru` | `hru=Latent` | **H**igh-**R**es **U**pscaler. Specifies the upscaling model. | A1111 / Forge |
+| `hdcs` | `hdcs=3.5` | **H**ires **D**istilled **C**FG. Distilled scale during the HR pass. | A1111 / Forge |
+| `dns` | `dns=0.45` | **D**e**n**oi**s**ing Strength. Intensity of the HR fix pass. | A1111 / Forge |
 
-#### Command Line Flags
-Use `+` to enable and `-` to disable a feature for a single generation.
+#### Command Line Flags (Toggles)
+Flags provide a quick way to override your default **Valves** configuration for a single message.
 
-| Flag | Description |
-| :--- | :--- |
-| `+h` / `-h` | Toggles **H**igh-Res mode. For OpenAI, this maps to `quality: hd`. |
-| `+a` / `-a` | Toggles the Vision Quality **A**udit. |
-| `+p` / `-p` | Toggles **P**rompt Enhancement. |
-| `+d` / `-d` | Toggles **D**ebug mode, printing state info in the chat. |
+| Flag | Name | Description |
+| :--- | :--- | :--- |
+| `+h` / `-h` | **H**igh-Res | Toggles High-Res Fix. For OpenAI, `+h` activates `quality: hd`. |
+| `+p` / `-p` | **P**rompt | Toggles the LLM Prompt Enhancer. |
+| `+a` / `-a` | **A**udit | Toggles the post-generation Vision Quality Audit. |
+| `+d` / `-d` | **D**ebug | Toggles Debug Mode (prints internal state JSON in chat). |
 
 ---
 
-### 📚 Shortcut Tables
+### ⚡ Shortcut Tables
 
-Easymage includes shortcuts for common settings to speed up your workflow.
+Easymage uses optimized shortcodes to minimize typing while maintaining full technical control. However, for those who prefer clarity or are using scripts, **full parameter names are also supported**.
 
 <details>
 <summary><strong>Engine Shortcuts (`ge=...`)</strong></summary>
 
-| Shortcut | Engine |
+| Shortcut | Engine Name | Backend API |
+| :--- | :--- | :--- |
+| `a` | `automatic1111` | SD Forge / A1111 (Direct HTTPX) |
+| `o` | `openai` | DALL-E 3 (Direct HTTPX) |
+| `g` | `gemini` | Imagen 3 (Direct HTTPX) |
+| `c` | `comfyui` | ComfyUI (Open WebUI API) |
+</details>
+
+<details>
+<summary><strong>Model Shortcuts (`mdl=...`)</strong></summary>
+
+| Shortcut | API Model Name / Identifier |
 | :--- | :--- |
-| `a` | `automatic1111` |
-| `o` | `openai` |
-| `g` | `gemini` |
-| `c` | `comfyui` |
+| `d3` | `dall-e-3` |
+| `d2` | `dall-e-2` |
+| `i3` | `imagen-3.0-generate-001` |
+| `i3f` | `imagen-3.0-fast-generate-001` |
 </details>
 
 <details>
 <summary><strong>Aspect Ratio Shortcuts (`ar=...`)</strong></summary>
 
-| Shortcut | Ratio |
-| :--- | :--- |
-| `1` | `1:1` |
-| `16` | `16:9` |
-| `9` | `9:16` |
-| `4` | `4:3` |
-| `3` | `3:4` |
-| `21` | `21:9` |
+| Shortcut | Ratio | Common Use Case |
+| :--- | :--- | :--- |
+| `1` | `1:1` | Square (Social Media) |
+| `16` | `16:9` | Cinematic Widescreen |
+| `9` | `9:16` | Vertical / Reels |
+| `4` | `4:3` | Photography Standard |
+| `3` | `3:4` | Portrait |
+| `21` | `21:9` | Ultra-Widescreen |
 </details>
 
 <details>
-<summary><strong>Full Sampler Shortcut List (`smp=...`)</strong></summary>
+<summary><strong>Sampler Shortcuts (`smp=...`)</strong></summary>
 
-| Shortcut | Full Name |
-| :--- | :--- |
-| `d3s` | DPM++ 3M SDE |
-| `d2sh` | DPM++ 2M SDE Heun |
-| `d2s` | DPM++ 2M SDE |
-| `d2m` | DPM++ 2M |
-| `d2sa`| DPM++ 2S a |
-| `ds` | DPM++ SDE |
-| `ea` | Euler a |
-| `e` | Euler |
-| `l` | LMS |
-| `h` | Heun |
-| `d2` | DPM2 |
-| `d2a` | DPM2 a |
-| `df` | DPM fast |
-| `dad` | DPM adaptive |
-| `r` | Restart |
-| `h2` | HeunPP2 |
-| `ip` | IPNDM |
-| `ipv` | IPNDM_V |
-| `de` | DEIS |
-| `u` | UniPC |
-| `lcm` | LCM |
-| `di` | DDIM |
-| `dic` | DDIM CFG++ |
-| `dp` | DDPM |
+| Code | Full Sampler Name | Code | Full Sampler Name |
+| :--- | :--- | :--- | :--- |
+| `d3s` | DPM++ 3M SDE | `df` | DPM fast |
+| `d2sh`| DPM++ 2M SDE Heun | `dad` | DPM adaptive |
+| `d2s` | DPM++ 2M SDE | `r` | Restart |
+| `d2m` | DPM++ 2M | `h2` | HeunPP2 |
+| `d2sa`| DPM++ 2S a | `ip` | IPNDM |
+| `ds` | DPM++ SDE | `ipv` | IPNDM_V |
+| `ea` | Euler a | `de` | DEIS |
+| `e` | Euler | `u` | UniPC |
+| `l` | LMS | `lcm` | LCM |
+| `h` | Heun | `di` | DDIM |
+| `d2` | DPM2 | `dic` | DDIM CFG++ |
+| `d2a` | DPM2 a | `dp` | DDPM |
 </details>
 
 <details>
-<summary><strong>Full Scheduler Shortcut List (`sch=...`)</strong></summary>
+<summary><strong>Scheduler Shortcuts (`sch=...`)</strong></summary>
 
-| Shortcut | Full Name |
-| :--- | :--- |
-| `a` | Automatic |
-| `u` | Uniform |
-| `k` | Karras |
-| `e` | Exponential |
-| `pe` | Polyexponential |
-| `su` | SGM Uniform |
-| `ko` | KL Optimal |
-| `ays` | Align Your Steps |
-| `aysg`| Align Your Steps GITS |
-| `ays11`| Align Your Steps 11 |
-| `ays32`| Align Your Steps 32 |
-| `s` | Simple |
-| `n` | Normal |
-| `di` | DDIM |
-| `b` | Beta |
-| `t` | Turbo |
+| Code | Full Scheduler Name | Code | Full Scheduler Name |
+| :--- | :--- | :--- | :--- |
+| `a` | Automatic | `ays` | Align Your Steps |
+| `u` | Uniform | `aysg`| Align Your Steps GITS |
+| `k` | Karras | `ays11`| Align Your Steps 11 |
+| `e` | Exponential | `ays32`| Align Your Steps 32 |
+| `pe` | Polyexponential | `s` | Simple |
+| `su` | SGM Uniform | `n` | Normal |
+| `ko` | KL Optimal | `di` | DDIM |
+| `b` | Beta | `t` | Turbo |
 </details>
+
+> 💡 **Note**: Text values with spaces (e.g. sampler names) must be enclosed in double quotes: `smp="Euler a"`).
+
+---
+## The Selective Negation Logic
+
+### 🧠 The Selective Negation Strategy
+
+One of the most complex challenges in AI image generation is "negation" (telling the AI what *not* to include). Most engines are designed to follow positive instructions and often struggle with negative ones unless they are formatted specifically for their architecture.
+
+Easymage v0.8.12 introduces a **Selective Negation Strategy** that automatically chooses the best method to handle your `--no ` requirements.
+
+#### 1. Native API Handling (High Fidelity)
+If the generation engine has a dedicated technical field for negative prompts, Easymage passes your exclusions directly to the API. This provides a "surgical" removal of elements without affecting the creative description of the main subject.
+*   **Gemini (Imagen 3)**: Uses the `negativePrompt` parameter natively.
+*   **Forge (A1111)**: Uses the `negative_prompt` field **only when High-Res Fix (`+h`) is enabled**, ensuring maximum quality during the upscale pass.
+
+#### 2. LLM Fallback Integration (Natural Description)
+Many engines (like DALL-E 3) do not have a native "Negative Prompt" field. For these cases, or when Forge is used in standard mode, Easymage uses its **LLM Prompt Engineer** to "digest" the exclusions.
+*   Instead of simply appending a list of words, the LLM rewrites the description to ensure those elements are logically absent. 
+*   *Example*: If you specify `--no people`, the LLM won't just say "no people"; it will describe a "completely deserted, silent landscape where no human presence is visible," which is much more effective for models like DALL-E.
+
+#### Summary Logic Table
+
+| Engine / Condition | Method | How it works |
+| :--- | :--- | :--- |
+| **Gemini** | Native | Sent to the `negativePrompt` API field. |
+| **OpenAI (DALL-E 3)** | LLM Fallback | Integrated into the descriptive flow of the prompt. |
+| **Forge (Hires Fix ON)** | Native | Sent to the technical `negative_prompt` field. |
+| **Forge (Standard)** | LLM Fallback | Integrated into the descriptive prompt by the LLM. |
+| **ComfyUI (Fallback)** | LLM Fallback | Integrated into the descriptive prompt by the LLM. |
+| **`imgx` Trigger** | LLM Fallback | Always integrated into the text to provide a ready-to-use natural prompt. |
 
 ---
 
-### 🪄 Practical Examples
+### 🪄 The "AVOID" Protocol
+When the LLM Fallback is active, the system prompt for the Enhancer is dynamically updated with the **MANDATORY AVOID** rule. This forces the LLM to verify that the forbidden elements are not just ignored, but that the scene is described in a way that confirms their absence, significantly improving the **Vision Quality Audit** success rate.
 
-#### Example 1: Simple & Fast
-You just want an image of a cat.
-```
-img a cat
-```
-*Easymage will expand this into a detailed prompt before generating the image.*
+---
 
-#### Example 2: Style and Subject
-You want a red car in a specific style, excluding blurriness.
-```
-img cinematic, cyberpunk -- a red car --no blurry
-```
-*The styles "cinematic" and "cyberpunk" are added to the subject "a red car", with a negative prompt.*
+## Intelligent Engine Router
 
-#### Example 3: Full Technical Control (Forge/A1111)
-You want a fantasy portrait with specific technical parameters.
-```
-img stp=30 cs=8 ar=3:4 smp=d3s -- portrait of an elf --no ugly hands
-```
-*This sets 30 steps, CFG 8, a 3:4 aspect ratio, and uses the DPM++ 3M SDE sampler.*
 
-#### Example 4: OpenAI Specifics (DALL-E 3)
-You want a high-quality image with a "natural" style.
-```
-img +h stl=n ge=o -- a dog playing in a park
-```
-*`+h` activates `quality:hd`, `stl=n` sets `style:natural`, and `ge=o` ensures it runs on OpenAI.*
+### ⚙️ Engine & Parameter Mapping
 
-#### Example 5: Multiple Generations (Gemini)
-You want 4 variations of a landscape with a specific seed.
-```
-img n=4 sd=12345 ge=g -- vast landscape of an alien planet
-```
-*`n=4` is translated to `sampleCount: 4` and the `seed` is passed to the Gemini API.*
+Easymage acts as a high-level abstraction layer. It converts universal parameters into the specific JSON payloads required by each engine. Below are the technical mapping details.
 
-#### Example 6: Text-Only Mode
-You need a detailed prompt to use in another application.
-```
-imgx epic space battle
-```
-*Easymage returns only the enhanced text prompt, without generating any images.*
+<details>
+<summary><strong>➡️ View Full Mapping Tables</strong></summary>
+
+#### 1. Automatic1111 / Forge (Direct HTTPX)
+*Connection: Sends a direct POST request to `/sdapi/v1/txt2img`.*
+| EasyMage Parameter | Forge API Field | Technical Logic |
+| :--- | :--- | :--- |
+| **enhanced_prompt** | `prompt` | Final expanded text from LLM. |
+| **negative_prompt** | `negative_prompt` | ⚠️ **Conditional:** Sent natively only if `+h` (Hires Fix) is ON. If OFF, it's integrated into the prompt text. |
+| **size** | `width` / `height` | The `WxH` string is split into two integers. |
+| **stp** / **sd** / **cs** | `steps` / `seed` / `cfg_scale` | Passed directly to the API. |
+| **dcs** | `distilled_cfg_scale` | Used for Flux/SD3. Forces native `cfg_scale` to 1.0. |
+| **smp** / **sch** | `sampler_name` / `scheduler` | Converted via `SAMPLER_MAP` and `SCHEDULER_MAP`. |
+| **hr** / **hru** / **dns** | `enable_hr` / `hr_upscaler` / `denoising_strength` | Activates the Hires Fix pipeline. |
+
+#### 2. OpenAI (DALL-E 3) (Direct HTTPX)
+*Connection: Sends a direct POST request to `/images/generations`.*
+| EasyMage Parameter | OpenAI API Field | Technical Logic |
+| :--- | :--- | :--- |
+| **enhanced_prompt** | `prompt` | Main prompt. |
+| **negative_prompt** | - | ❌ **LLM Fallback:** Always integrated into the descriptive text. |
+| **enable_hr** (`+h`) | `quality` | `True` → `hd`, `False` → `standard`. |
+| **stl** | `style` | `v` → `vivid` (default), `n` → `natural`. |
+| **size** | `size` | Snaps to `1024x1024`, `1792x1024`, or `1024x1792`. |
+| **user (Context)** | `user` | Automatically passes your Open WebUI User ID. |
+| **-** | `n` | ⚠️ **Hardcoded to 1** (API limitation). |
+| **-** | `response_format` | ⚠️ **Hardcoded to `b64_json`**. |
+
+#### 3. Gemini (Imagen 3) (Direct HTTPX)
+*Connection: Sends a direct POST request to Google's `:predict` endpoint.*
+| EasyMage Parameter | Gemini API Field | Technical Logic |
+| :--- | :--- | :--- |
+| **enhanced_prompt** | `instances[0].prompt` | Main prompt. |
+| **negative_prompt** | `parameters.negativePrompt` | ✅ **Always Native:** Supported directly by Gemini. |
+| **n** | `parameters.sampleCount` | Number of images (1-4). |
+| **sd** | `parameters.seed` | Supported because `addWatermark` is set to false. |
+| **ar** / **sz** | `parameters.aspectRatio` | ⚠️ **Calculated:** Pixel dimensions are converted back to a ratio string (`1:1`, `16:9`, etc.). |
+| **-** | `parameters.safetySetting` | ⚠️ **Hardcoded to `block_none`** for maximum flexibility. |
+| **-** | `parameters.personGeneration`| ⚠️ **Hardcoded to `allow_all`**. |
+| **-** | `parameters.addWatermark` | ⚠️ **Hardcoded to `false`**. |
+| **-** | `parameters.includeReasoning` | ⚠️ **Hardcoded to `false`**. |
+
+#### 4. ComfyUI / Fallback (via Open WebUI API)
+*Connection: Uses the internal `image_generations` router of Open WebUI.*
+| EasyMage Parameter | OWUI Form Field | Technical Logic |
+| :--- | :--- | :--- |
+| **enhanced_prompt** | `prompt` | Main prompt. |
+| **negative_prompt** | - | ❌ **LLM Fallback:** Integrated into the descriptive text. |
+| **mdl** | `model` | Checkpoint name. |
+| **sz** | `size` | Size string. |
+| **n** | `n` | Number of images. |
+| **All others** | - | ❌ **Unsupported:** The standard OWUI router does not expose seed, steps, or CFG Scale for this method. |
+</details>
 
 ---
 
 ### 📐 Size & Aspect Ratio Logic
 
-Easymage normalizes dimensions for each engine:
-*   **If you use `ar` (e.g., `ar=16:9`):** Easymage calculates the closest supported pixel dimensions.
-    *   **OpenAI**: Converts `16:9` to `1792x1024`.
-    *   **Gemini**: Passes the `16:9` ratio string directly.
-    *   **A1111/Forge**: Calculates pixel dimensions based on the default width (e.g., 1024), maintaining the ratio and rounding to a multiple of 8 (e.g., 1024x576).
-*   **If you use `sz` (e.g., `sz=800x600`):**
-    *   **OpenAI**: Snaps to the closest supported API dimension (e.g., `1024x1024`).
-    *   **Gemini**: Calculates the approximate aspect ratio (e.g., `4:3`) and passes it to the API.
-    *   **A1111/Forge**: Uses the exact pixel values.
+Easymage handles dimensions dynamically to satisfy different engine requirements:
+
+1. **Input Parsing**: Using `sz=N` automatically sets the target to `NxN`. Using `sz=WxH` sets specific targets.
+2. **Normalization**:
+   - **OpenAI (DALL-E 3)**: Ignores specific pixels and "snaps" to the closest supported HD resolution (`1024x1024`, `1792x1024`, or `1024x1792`) based on the calculated aspect ratio.
+   - **Gemini (Imagen 3)**: Converts the dimensions into one of the supported ratio strings (`1:1`, `4:3`, `16:9`, etc.).
+   - **Forge / A1111**: Uses the requested pixels but rounds them to the nearest multiple of **8** to ensure hardware compatibility.
+3. **AR Overriding**: If the `ar` parameter is present, it takes precedence in calculating the final height relative to the requested width.
 
 ---
+## Configuration & Diagnostics
+
 
 ### 🔧 Filter Configuration (Valves)
 
-Control the default behavior of Easymage from your Open WebUI profile settings (`Settings > Filters > Easymage`).
+Valves allow you to set the "factory defaults" for Easymage. You can find these settings in your Open WebUI profile under `Settings > Filters > Easymage`. 
+
+**Note**: Any command sent via CLI (e.g., `sz=512x512`) will temporarily override these global settings for that specific message.
 
 | Valve | Default | Description |
 | :--- | :---: | :--- |
-| **Enhanced Prompt** | `True` | If enabled, the LLM expands your prompt with technical details by default. |
-| **Quality Audit** | `True` | If enabled, a Vision model analyzes the final image and provides a quality score. |
-| **Strict Audit** | `False` | Enables a "ruthless" audit mode that is much stricter in identifying technical flaws. |
-| **Persistent Vision Cache**| `False` | Saves model vision capability test results to disk to avoid redundant probes. |
-| **Debug** | `False` | Prints detailed execution logs and state dumps to the server/container console. |
-| **Model** | `None` | Overrides the globally selected image generation model (e.g., `sd_xl_base_1.0.safetensors`). |
+| **Enhanced Prompt** | `True` | Enables the LLM Prompt Engineer to expand your input by default. |
+| **Quality Audit** | `True` | Enables the post-generation Vision analysis and scoring. |
+| **Strict Audit** | `False` | Enables "Ruthless Mode" for the audit, being much more severe with technical flaws. |
+| **Persistent Vision Cache**| `False` | Saves the results of the Vision Capability test to disk to speed up subsequent starts. |
+| **Debug** | `False` | Prints the full internal state JSON and diagnostic logs to the Docker/Server console. |
+| **Model** | `None` | Forces a specific model/checkpoint (e.g., `flux1-dev.safetensors`) for all generations. |
+| **Generation Timeout** | `120` | Maximum time (seconds) to wait for the image engine to respond. |
 | **Steps** | `20` | Default number of sampling steps. |
 | **Size** | `1024x1024` | Default image dimensions. |
-| **Seed** | `-1` | Default seed (`-1` means random). |
-| **CFG Scale** | `1.0` | Default CFG Scale. |
-| **Sampler Name** | `Euler` | Default sampler. |
-| **Scheduler** | `Simple` | Default scheduler. |
-| **Enable HR** | `False` | Default state for High-Res Fix. |
-| **N Iter** | `1` | Default number of images to generate. |
-| **Batch Size** | `1` | Default batch size. |
-| **HR Scale** | `2.0` | Default High-Res upscale factor. |
-| **HR Upscaler** | `Latent` | Default High-Res upscaler model. |
-| **Denoising Strength**| `0.45` | Default denoising strength for High-Res Fix. |
+| **Seed** | `-1` | Default seed value (`-1` for random). |
+| **CFG Scale** | `1.0` | Default Classifier-Free Guidance scale. |
+| **Distilled CFG Scale** | `3.5` | Default Distilled CFG for Flux/SD3 models. |
+| **Sampler Name** | `Euler` | Default sampling algorithm. |
+| **Scheduler** | `Simple` | Default noise schedule type. |
+| **Enable HR** | `False` | Enables High-Res Fix (Forge) or HD Quality (OpenAI) by default. |
+| **HR Scale** | `2.0` | Default multiplier for the High-Res Fix pass. |
+| **HR Upscaler** | `Latent` | Default model used for the Hires upscale pass. |
+| **HR Distilled CFG** | `3.5` | Default Distilled CFG used during the Hires pass. |
+| **Denoising Strength** | `0.45` | Default intensity of the High-Res Fix pass. |
 
 ---
 
-### ⚙️ Engine & Parameter Mapping
+### 📌 Output, Citations & Performance
 
-Easymage acts as a universal translator. Here is how your commands are mapped to each backend API.
+Easymage provides a transparent output system. Beneath the generated image, you will see three linked citations and a performance status bar.
 
-<details>
-<summary><strong>➡️ View Full Mapping Tables</strong></summary>
+#### 1. The Citation System
+*   `[🚀 PROMPT]`: Shows the **Enhanced Prompt** (the text actually seen by the GPU) followed by a structured recap of your original **Styles** and **Negative Prompt**.
+*   `[🟢 SCORE: XX%]`: The result of the Visual Quality Audit. It includes a technical critique and a colored emoji indicator based on the score (80+ 🟢, 70+ 🔵, 60+ 🟡, 40+ 🟠, <40 🔴).
+*   `[🔍 DETAILS]`: A full technical recap including the backend Engine used, the active Model, Resolution, and specific latency for each pipeline stage.
 
-#### Automatic1111 / Forge (Direct HTTPX)
-*Logic: Pass-through. Most parameters are sent directly.*
-| EasyMage Parameter | Forge API Parameter | Notes |
-| :--- | :--- | :--- |
-| **enhanced_prompt** | `prompt` | Final LLM-enhanced prompt. |
-| **negative_prompt** | `negative_prompt` | Passed directly. |
-| **size** (WxH) | `width`, `height` | Split into two integers. |
-| **All others** | *(matches)* | `steps`, `seed`, `cfg_scale`, `sampler_name`, etc., are passed directly. |
+#### 2. Real-Time Performance Tracking
+The final status bar provides a detailed snapshot of the generation efficiency:
+`[Total Time]s total | [Image Gen]s img | [Total Tokens] tk | [Throughput] tk/s`
 
-#### OpenAI (DALL-E 3) (Direct HTTPX)
-*Logic: Strict mapping to DALL-E 3's capabilities.*
-| EasyMage Parameter | OpenAI API Parameter | Notes |
-| :--- | :--- | :--- |
-| **enhanced_prompt** | `prompt` | Main prompt. |
-| **negative_prompt** | `prompt` | ⚠️ **Merged:** Appended as `... . Negative: {text}`. |
-| **enable_hr** (`+h`) | `quality` | `True` → `hd`, `False` → `standard`. |
-| **style** (`stl=...`) | `style` | `v` → `vivid` (default), `n` → `natural`. |
-| **user (Context)** | `user` | Passes the Open WebUI user ID. |
-| **n_iter** (`n=...`) | `n` | ⚠️ **Hardcoded to 1**. |
-| **-** | `response_format` | ⚠️ **Hardcoded to `b64_json`**. |
-
-#### Gemini (Imagen 3) (Direct HTTPX)
-*Logic: Structured for Google Cloud AI Platform.*
-| EasyMage Parameter | Gemini API Parameter | Notes |
-| :--- | :--- | :--- |
-| **enhanced_prompt** | `instances[0].prompt` | Main prompt. |
-| **negative_prompt** | `parameters.negativePrompt`| Passed natively. |
-| **n_iter** (`n=...`) | `parameters.sampleCount` | Number of images (1-4). |
-| **seed** (`sd=...`) | `parameters.seed` | Passed natively. |
-| **size** / **aspect_ratio** | `parameters.aspectRatio` | ⚠️ **Calculated:** Pixel dimensions are converted to a ratio string (e.g., "16:9"). |
-| **-** | `parameters.addWatermark` | ⚠️ **Hardcoded to `false`** to enable seed usage. |
-| **-** | `parameters.personGeneration`| ⚠️ **Hardcoded to `allow_all`**. |
-| **-** | `parameters.includeReasoning` | ⚠️ **Hardcoded to `false`**. |
-| **-** | `parameters.safetySetting` | ⚠️ **Hardcoded to `block_none`**. |
-
-#### ComfyUI / Fallback (via Open WebUI API)
-*Logic: Uses the standard, limited Open WebUI API.*
-| EasyMage Parameter | OWUI Form Parameter | Notes |
-| :--- | :--- | :--- |
-| **enhanced_prompt** | `prompt` | Main prompt. |
-| **model** | `model` | Model name. |
-| **size** | `size` | Size string. |
-| **n_iter** | `n` | Number of images. |
-| **All others** | - | ❌ **Ignored:** Advanced parameters like `seed`, `steps`, `cfg` are not supported by this fallback method. |
-</details>
+*   **Total Time**: The entire duration from your message to the final output.
+*   **img**: The time spent waiting specifically for the Image Engine.
+*   **tk / tk/s**: Token count and speed of the LLM during the Prompt Enhancement phase.
 
 ---
 
-### 📌 Output and Citations
+### 🛠️ Diagnostics & Debugging
 
-Beneath the generated image, you'll find three citations for a complete analysis:
-1.  `[🚀 PROMPT]`: The final, enhanced prompt that was sent to the generation engine.
-2.  `[🟢 SCORE: xx%]`: The technical critique and score from the Quality Audit.
-3.  `[🔍 DETAILS]`: A summary of the configuration and performance metrics.
+If you encounter issues or want to see how Easymage is "thinking," you can activate **Debug Mode** via the Valve or by adding `+d` to your message.
+
+*   **In-Chat Debug**: Easymage will print two formatted JSON blocks containing the current **Internal Model State** (parsed values, calculated ratios, selected engine) and the current **Valve Configuration**.
+*   **Docker Logs**: Detailed "⚡ EASYMAGE DEBUG" logs are printed to the server console, including the raw System Prompts sent to the LLM and the raw responses from the image APIs.
+*   **Error Handling**: If an engine fails, Easymage will intercept the error and display a detailed "❌ EASYMAGE ERROR" message in the chat, preventing the filter from crashing.
 
 ---
 
-### 📜 Changelog
+### 🔮 Future Developments
 
-#### v0.8.1 (2026-02-10)
-*   **Intelligent Router**: Implemented a dispatcher with dedicated methods for each engine.
-*   **Native OpenAI & Gemini**: Added direct HTTPX support for OpenAI and Gemini with full parameter mapping.
-*   **Advanced Mapping**: Implemented logic for `style`/`quality` (OpenAI) and `seed`/`watermark` (Gemini).
-*   **UI Cleanup**: Improved code block formatting in chat messages.
+Easymage is constantly evolving. Here are the key features currently in the pipeline:
 
-#### v0.7.5 (2026-02-08)
-*   **SoC Refactor**: Restructured the code into specialized classes (`InferenceEngine`, `PromptParser`, etc.).
-*   **Optimized Inference**: Generalized the `_infer` method to handle text and vision calls agnostically.
-*   **Local Performance Boost**: Optimized the flow to skip the vision probe when using `imgx`.
+-   **AWS Nova Canvas Integration**: Integration of Amazon’s Nova Canvas model via AWS Bedrock into the EM image generation pipeline.
+
+-   **Filter Chainability**: Insert EM logic into the native filters sequence, allowing it to interact with, modify, or pass data to other active filters.
+
+-   **Multi-Image & Batching**: Support for generating multiple iterations in a single call and automated batch processing for high-volume workflows.
+    
+-   **ComfyUI Native Integration**: Bridging the gap with ComfyUI backends to leverage its node-based power directly through Easymage's streamlined syntax.
+    
+-   **Fine-Tuned Control (LoRAs)**: Comprehensive support for custom LoRA injection (A1111/Forge & ComfyUI), enabling precise style and character consistency.
+    
+-   **Image-to-Image (Img2Img)**: Implementation of the Img2Img pipeline, allowing users to use reference images as a foundation for Easymage-driven transformations.
+
+---
+
+### 📄 License
+Easymage is released under the **MIT License**. Feel free to use, modify, and distribute it within the Open WebUI community.
+
+---
+
+### 🤝 Contributing & Support
+If you encounter bugs or have feature requests, please open an issue on the [GitHub Repository](https://github.com/annibale-x/Easymage) or contact the author through the Open WebUI community portal.
 
