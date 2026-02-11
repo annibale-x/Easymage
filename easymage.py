@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.12
+version: 0.8.13
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -95,6 +95,10 @@ class EasymageConfig:
         TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
                 Compare image with: '{prompt}',
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+        
+        # Add explicit penalty rule for content contradictions
+        RULE: If any element explicitly forbidden in the prompt is present, the AUDIT score MUST be below 50.
+        
         TASK: TECHNICAL EVALUATION:
                 Evaluate NOISE, GRAIN, MELTING, JAGGIES.
         MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists and ➔ for headings.
@@ -112,6 +116,11 @@ class EasymageConfig:
                 Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
                 Identify any contradictions, missing elements, or hallucinations.
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
+        
+        # Add ruthless penalty rule for negative prompt violations
+        RULE: Contradictions regarding the presence or absence of objects are CRITICAL FAILURES. 
+        RULE: If an element explicitly marked as absent/forbidden is detected, the AUDIT score MUST NOT exceed 30.
+        
         RULE: Be extremely severe in technical evaluation. Do not excuse defects.
         TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
                 Perform a ruthless technical audit. Identify every visual flaw.
@@ -242,12 +251,15 @@ class EmitterService:
                 }
             )
 
+    async def emit_debug(self, msg: str):
+        """Prints diagnostic logs to standard error if debug is enabled."""
+        print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
+
 
 class InferenceEngine:
     """Generalized inference engine for Text, Vision, and Probe tasks."""
 
     def __init__(self, request, user, state: EasymageState, emitter: EmitterService):
-
         self.request, self.user, self.state, self.emitter = (
             request,
             user,
@@ -263,34 +275,136 @@ class InferenceEngine:
         if task:
             await self.emitter.emit_status(f"{task}..")
 
+        # 1. Prepare Messages
         msgs = []
-
         if sys_c := data.get("system"):
-            msgs.append({"role": "system", "content": sys_c})
+            # CLEANING: Remove newlines and extra spaces from System Prompt
+            clean_sys = re.sub(r"\s+", " ", sys_c).strip()
+            msgs.append({"role": "system", "content": clean_sys})
 
         user_c = data.get("user")
-
         if isinstance(user_c, dict):
             cl = []
-
             if i_url := user_c.get("image_url"):
                 cl.append({"type": "image_url", "image_url": {"url": i_url}})
-
             if t_c := user_c.get("text"):
-                cl.append({"type": "text", "text": t_c})
-
+                # CLEANING: Remove newlines from User Text content
+                clean_text = re.sub(r"\s+", " ", t_c).strip()
+                cl.append({"type": "text", "text": clean_text})
             msgs.append({"role": "user", "content": cl})
-
         else:
-            msgs.append({"role": "user", "content": str(user_c)})
+            # CLEANING: Remove newlines from simple User string content
+            clean_user = re.sub(r"\s+", " ", str(user_c)).strip()
+            msgs.append({"role": "user", "content": clean_user})
 
+        # 2. Determine effective seed
+        s_val = self.state.model.seed if self.state.model.seed is not None else -1
+        effective_seed = int(s_val) if int(s_val) >= 0 else 42
+
+        # 3. DIRECT OLLAMA CALL (Primary Strategy for Prompt Enhancing)
+        # We try this FIRST to bypass Open WebUI's session state pollution.
+        if task == "Prompt Enhancing":
+
+            # FIXME: Sistemare la risoluzione del base url di Ollama
+            # TODO: Cercare di capire se siamo agganciati ad Ollama o ad una API cloud
+
+            # Retrieve Ollama URL safely
+            ollama_url = getattr(
+                self.request.app.state.config,
+                "OLLAMA_API_BASE_URL",
+                "http://host.docker.internal:11434",
+            )
+
+            # Simple heuristic: If it's not obviously an external API model, try Ollama
+            is_likely_ollama = (
+                "gpt" not in self.state.model.id
+                and "dall-e" not in self.state.model.id
+                and "gemini" not in self.state.model.id
+            )
+
+            if ollama_url and is_likely_ollama:
+                try:
+                    # Construct single-string prompt for /api/generate
+                    final_ollama_prompt = ""
+                    if msgs[0]["role"] == "system":
+                        final_ollama_prompt += msgs[0]["content"] + " "
+
+                    if isinstance(msgs[-1]["content"], list):
+                        for part in msgs[-1]["content"]:
+                            if part.get("type") == "text":
+                                final_ollama_prompt += part.get("text")
+                    else:
+                        final_ollama_prompt += msgs[-1]["content"]
+
+                    ollama_payload = {
+                        "model": self.state.model.id,
+                        "prompt": final_ollama_prompt.strip(),
+                        "stream": False,
+                        # POWERSHELL VERIFIED DETERMINISTIC OPTIONS
+                        "options": {
+                            "seed": effective_seed,
+                            "temperature": 0.0,
+                            "top_k": 1,
+                            "num_ctx": 4096,
+                            "mirostat": 0,
+                        },
+                    }
+
+                    if self.state.model.debug:
+                        await self.emitter.emit_debug(
+                            f"TRYING DIRECT OLLAMA CALL: {ollama_url}"
+                        )
+                        await self.emitter.emit_debug(
+                            f"PAYLOAD: {json.dumps(ollama_payload, indent=2)}"
+                        )
+
+                    async with httpx.AsyncClient(
+                        timeout=self.state.valves.generation_timeout
+                    ) as client:
+                        response = await client.post(
+                            f"{ollama_url}/api/generate",
+                            json=ollama_payload,
+                            headers={"Content-Type": "application/json"},
+                        )
+                        response.raise_for_status()
+
+                        resp_json = response.json()
+                        cont = resp_json.get("response", "").strip()
+
+                        # CLEANING: Remove potential reasoning tags if model outputs them
+                        cont = cont.split("</think>")[-1].strip()
+
+                        self.state.register_stat(
+                            task, time.time() - start, len(cont.split())
+                        )
+                        return cont.strip('"').strip()
+
+                except Exception as e:
+                    # If Direct Call fails (e.g. model not found on Ollama, connection error),
+                    # Log it and fall through to standard generate_chat_completion
+                    if self.state.model.debug:
+                        await self.emitter.emit_debug(
+                            f"DIRECT OLLAMA FAILED (Fallback to Standard): {e}"
+                        )
+                    pass
+
+        # 4. STANDARD FALLBACK (via Open WebUI)
+        # Used if Direct Call failed or task is not Prompt Enhancing
         payload = {
             "model": self.state.model.id,
             "messages": msgs,
             "stream": False,
-            "seed": 42,
+            "seed": effective_seed,
             "temperature": 0.0,
-            "is_probe": True,
+            "top_p": 1.0,
+            "top_k": 1,
+            "options": {
+                "seed": effective_seed,
+                "temperature": 0.0,
+                "top_k": 1,
+                "num_ctx": 4096,
+                "mirostat": 0,
+            },
         }
 
         try:
@@ -335,12 +449,15 @@ class PromptParser:
             prefix, subj = clean.split(" -- ", 1)
 
         else:
-            pat = r'(\b\w+=(?:"[^"]*"|\S+))|([+-][dpah])'
+            # FIX: Use lookaround to ensure flags are standalone tokens and not part of words like 'low-angle'
+            pat = r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)'
             matches = list(re.finditer(pat, clean))
             idx = matches[-1].end() if matches else 0
             prefix, subj = clean[:idx], clean[idx:].strip()
 
-        rem_styles = re.sub(r'(\b\w+=(?:"[^"]*"|\S+))|([+-][dpah])', "", prefix).strip()
+        rem_styles = re.sub(
+            r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)', "", prefix
+        ).strip()
         rem_styles = re.sub(r"^[\s,]+|[\s,]+$", "", rem_styles)
 
         # Parse key=value pairs
@@ -395,11 +512,11 @@ class PromptParser:
                 elif k == "sch":
                     model_state["scheduler"] = self._norm(v, self.config.SCHEDULER_MAP)
 
-                elif k == "n":
-                    model_state["n_iter"] = int(v)
+                # elif k == "n":
+                #     model_state["n_iter"] = int(v)
 
-                elif k == "b":
-                    model_state["batch_size"] = int(v)
+                # elif k == "b":
+                #     model_state["batch_size"] = int(v)
 
                 elif k == "cs":
                     model_state["cfg_scale"] = float(v)
@@ -429,7 +546,8 @@ class PromptParser:
                 continue
 
         # Parse flags like +d, -p
-        for flag in re.findall(r"([+-][dpah])", prefix):
+        # FIX: Apply the same lookaround logic to flag extraction loop
+        for flag in re.findall(r"(?<!\w)([+-][dpah])(?!\w)", prefix):
             v, char = flag[0] == "+", flag[1]
 
             if char == "d":
@@ -484,14 +602,15 @@ class Filter:
         )
         steps: int = 20
         size: str = "1024x1024"
+        aspect_ratio: str = "1:1"
         seed: int = -1
         cfg_scale: float = 1.0
         distilled_cfg_scale: float = 3.5
         sampler_name: str = "Euler"
         scheduler: str = "Simple"
         enable_hr: bool = False
-        n_iter: int = 1
-        batch_size: int = 1
+        # n_iter: int = 1
+        # batch_size: int = 1
         hr_scale: float = 2.0
         hr_upscaler: str = "Latent"
         hr_distilled_cfg: float = 3.5
