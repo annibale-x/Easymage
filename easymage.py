@@ -300,54 +300,52 @@ class InferenceEngine:
         if task:
             await self.ctx.em.emit_status(f"{task}..")
 
-        # Prepare Messages
-        msgs = []
+        # 1. Prepare a generic, abstract data structure
+        inference_data = {
+            "system_prompt": None,
+            "user_prompt": None,
+            "image_b64": None,
+        }
+
         if sys_c := data.get("system"):
-            clean_sys = re.sub(r"\s+", " ", sys_c).strip()
-            msgs.append({"role": "system", "content": clean_sys})
+            inference_data["system_prompt"] = re.sub(r"\s+", " ", sys_c).strip()
 
         user_c = data.get("user")
         if isinstance(user_c, dict):
-            cl = []
+            # This is a multimodal request
             if i_url := user_c.get("image_url"):
-                cl.append({"type": "image_url", "image_url": {"url": i_url}})
+                # CORRECTED LOGIC: Treat i_url as a string and extract base64 data.
+                inference_data["image_b64"] = i_url.split(",")[-1]
             if t_c := user_c.get("text"):
-                clean_text = re.sub(r"\s+", " ", t_c).strip()
-                cl.append({"type": "text", "text": clean_text})
-            msgs.append({"role": "user", "content": cl})
+                inference_data["user_prompt"] = re.sub(r"\s+", " ", t_c).strip()
         else:
-            clean_user = re.sub(r"\s+", " ", str(user_c)).strip()
-            msgs.append({"role": "user", "content": clean_user})
+            # Text-only request
+            inference_data["user_prompt"] = re.sub(r"\s+", " ", str(user_c)).strip()
 
-        # Configure Determinism
+        # 2. Configure Determinism (same as before)
         if creative_mode:
-            # Mode: PROMPT ENHANCING
-            # Temp 0.7 allows the Seed to influence the choice path.
             temperature = 0.7
-
             s_val = (
                 int(self.ctx.st.model.seed)
                 if self.ctx.st.model.seed is not None
                 else -1
             )
-
-            if s_val == -1:
-                seed = None  # True Random
-            else:
-                seed = s_val  # Deterministic Randomness
+            seed = None if s_val == -1 else s_val
         else:
-            # Mode: TECHNICAL / AUDIT
-            # Temp 0.0 forces Greedy Decoding (Seed is technically ignored but we pass 42)
             seed, temperature = 42, 0.0
 
-        # Dispatch
+        # 3. Dispatch to the specific engine builder
         backend_type = getattr(self.ctx.st.model, "llm_type", "ollama")
 
         try:
             if backend_type == "ollama":
-                content, usage = await self._infer_ollama(msgs, seed, temperature)
+                content, usage = await self._infer_ollama(
+                    inference_data, seed, temperature
+                )
             else:
-                content, usage = await self._infer_openai(msgs, seed, temperature)
+                content, usage = await self._infer_openai(
+                    inference_data, seed, temperature
+                )
 
             content = content.split("</think>")[-1].strip().strip('"').strip()
 
@@ -361,11 +359,26 @@ class InferenceEngine:
             return ""
 
     async def _infer_ollama(
-        self, messages: List[Dict], seed: Optional[int], temperature: float
+        self, inference_data: Dict, seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OLLAMA_BASE_URLS", [])
         base_url = base_urls[0].rstrip("/") if base_urls else "http://localhost:11434"
+
+        # Build the Ollama-specific payload from the generic data structure
+        messages = []
+        if sys_prompt := inference_data.get("system_prompt"):
+            messages.append({"role": "system", "content": sys_prompt})
+
+        user_message = {
+            "role": "user",
+            "content": inference_data.get("user_prompt", ""),
+        }
+
+        if image_data := inference_data.get("image_b64"):
+            user_message["images"] = [image_data]
+
+        messages.append(user_message)
 
         options = {
             "temperature": temperature,
@@ -375,8 +388,6 @@ class InferenceEngine:
 
         if seed is not None:
             options["seed"] = seed
-            # CRITICAL FIX: Removed options["top_k"] = 1
-            # We let the model sample (top_k default), controlled by the seed.
 
         payload = {
             "model": self.ctx.st.model.id,
@@ -389,6 +400,11 @@ class InferenceEngine:
             self.ctx.debug.log(
                 f"OLLAMA: {base_url}/api/chat (s:{seed} t:{temperature})"
             )
+            if inference_data.get("image_b64"):
+                self.ctx.debug.log(
+                    "Ollama vision payload detected, dumping built payload."
+                )
+                self.ctx.debug.dump(payload)
 
         async with httpx.AsyncClient(
             timeout=self.ctx.valves.generation_timeout
@@ -402,7 +418,7 @@ class InferenceEngine:
             )
 
     async def _infer_openai(
-        self, messages: List[Dict], seed: Optional[int], temperature: float
+        self, inference_data: Dict, seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OPENAI_API_BASE_URLS", [])
@@ -411,6 +427,29 @@ class InferenceEngine:
             base_urls[0].rstrip("/") if base_urls else "https://api.openai.com/v1"
         )
         api_key = api_keys[0] if api_keys else ""
+
+        # Build the OpenAI-specific payload from the generic data structure
+        messages = []
+        if sys_prompt := inference_data.get("system_prompt"):
+            messages.append({"role": "system", "content": sys_prompt})
+
+        content_parts = []
+        if user_prompt := inference_data.get("user_prompt"):
+            content_parts.append({"type": "text", "text": user_prompt})
+
+        if image_data := inference_data.get("image_b64"):
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_data}"},
+                }
+            )
+
+        # OpenAI expects content as a string for text-only, or a list for multimodal
+        user_content = (
+            content_parts if image_data else (inference_data.get("user_prompt") or "")
+        )
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
             "model": self.ctx.st.model.id,
@@ -421,8 +460,6 @@ class InferenceEngine:
 
         if seed is not None:
             payload["seed"] = seed
-            # CRITICAL FIX: Removed payload["top_p"] restrictions.
-            # Allowing full sampling controlled by seed.
 
         headers = {
             "Content-Type": "application/json",
@@ -833,7 +870,10 @@ class Filter:
                 self.debug.log(f"STATE: {json.dumps(self.st.model, indent=2)}")
 
             # 4. EXECUTION
-            if self.st.model.trigger == "img":
+            if self.st.model.trigger == "imgx":
+                await self.em.emit_message(self.st.model.enhanced_prompt)
+                await self._output_status_only()
+            else:
                 await self.img_gen.generate()
                 await self._vision_audit()
                 await self._output_delivery()
@@ -925,7 +965,7 @@ class Filter:
             else self.config.AUDIT_STANDARD
         )
         raw_v = await self.inf._infer(
-            task=None,
+            task="Vision Audit",
             data={
                 "system": tpl.format(
                     prompt=self.st.model.enhanced_prompt, lang=self.st.model.language
@@ -1090,8 +1130,9 @@ class Filter:
                 pass
 
         b = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAS0lEQVQ4jWNkYGB4ycDAwMPAwMDEgAn+ERD7wQLVzIVFITGABZutJAEmBuxOJ8kAil0w8AZgiyr6umAYGDDEA5GFgYHhB5QmB/wAAIcLCBsQodqvAAAAAElFTkSuQmCC"
+
         res = await self.inf._infer(
-            task=None,
+            task="Ensure Vision",
             data={
                 "system": "You must reply only 1 or 0",
                 "user": {
@@ -1132,32 +1173,39 @@ class Filter:
         )
 
     def _suppress_output(self, body: dict) -> dict:
-        """Cache-friendly suppression: preserves prefix to reuse KV cache."""
-        # Segnaliamo all'outlet che deve pulire l'output residuo
+        """Modifies the request payload to halt default LLM text response generation."""
 
-        self.st.easymage_skip = True
-
-        # NON svuotiamo body["messages"]. Manteniamo il prefisso originale.
-        # Questo permette a Ollama di rispondere in <100ms usando la cache.
-        body["max_tokens"] = 1
-        body["stream"] = False
-
-        # Forza il backend a fermarsi immediatamente
-        if self.st.model.llm_type == "ollama":
-            body["options"] = {
-                "num_predict": 1,
-                "temperature": 0.0,
-                "num_ctx": 4096,  # Deve corrispondere a quello usato in precedenza
-            }
+        body["messages"] = [{"role": "assistant", "content": ""}]
+        body["max_tokens"], body["stop"] = 1, [chr(i) for i in range(128)]
 
         return body
 
-    async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
-        """Cleans up the residual token generated by the suppressed backend call."""
-        if self.st.easymage_skip == True:
-            if "messages" in body and len(body["messages"]) > 0:
-                body["messages"][-1]["content"] = self.st.model.enhanced_prompt
-            await self._output_status_only()
-            return body
+    # def _suppress_output(self, body: dict) -> dict:
+    #     """Cache-friendly suppression: preserves prefix to reuse KV cache."""
+    #     # Segnaliamo all'outlet che deve pulire l'output residuo
 
-        return body
+    #     # self.st.easymage_skip = True
+
+    #     # NON svuotiamo body["messages"]. Manteniamo il prefisso originale.
+    #     # Questo permette a Ollama di rispondere in <100ms usando la cache.
+    #     body["max_tokens"] = 1
+    #     body["stream"] = False
+
+    #     # Forza il backend a fermarsi immediatamente
+    #     if self.st.model.llm_type == "ollama":
+    #         body["options"] = {
+    #             "num_predict": 1,
+    #             "temperature": 0.0,
+    #             "num_ctx": 4096,  # Deve corrispondere a quello usato in precedenza
+    #         }
+
+    #     return body
+
+    # async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+    #     """Cleans up the residual token generated by the suppressed backend call."""
+    #     if self.st.easymage_skip == True:
+    #         if "messages" in body and len(body["messages"]) > 0:
+    #             body["messages"][-1]["content"] = self.st.model.enha
+    #         return body
+
+    #     return body
