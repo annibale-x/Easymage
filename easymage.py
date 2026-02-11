@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.13
+version: 0.8.15
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -183,6 +183,8 @@ class EasymageState:
                 "enhanced_prompt": valves.enhanced_prompt,
                 "quality_audit": valves.quality_audit,
                 "persistent_vision_cache": valves.persistent_vision_cache,
+                # Added to store the LLM backend type (ollama vs openai)
+                "llm_type": "ollama",
             }
         )
         self.valves = valves
@@ -257,7 +259,7 @@ class EmitterService:
 
 
 class InferenceEngine:
-    """Generalized inference engine for Text, Vision, and Probe tasks."""
+    """Generalized inference engine for Text, Vision, and Probe tasks with deterministic control."""
 
     def __init__(self, request, user, state: EasymageState, emitter: EmitterService):
         self.request, self.user, self.state, self.emitter = (
@@ -267,8 +269,17 @@ class InferenceEngine:
             emitter,
         )
 
-    async def _infer(self, task: Optional[str], data: Dict[str, Any]) -> str:
-        """Executes LLM chat completions and extracts content, cleaning reasoning tags."""
+    async def _infer(
+        self, task: Optional[str], data: Dict[str, Any], creative_mode: bool = False
+    ) -> str:
+        """Executes LLM chat completions with mode-aware determinism.
+
+        Args:
+            task: UI status label.
+            data: Payload with 'system' and 'user'.
+            creative_mode: If True, respects user seed (-1 is random).
+                           If False, forces technical determinism (Seed 42, Temp 0).
+        """
 
         start = time.time()
 
@@ -278,7 +289,6 @@ class InferenceEngine:
         # 1. Prepare Messages
         msgs = []
         if sys_c := data.get("system"):
-            # CLEANING: Remove newlines and extra spaces from System Prompt
             clean_sys = re.sub(r"\s+", " ", sys_c).strip()
             msgs.append({"role": "system", "content": clean_sys})
 
@@ -288,146 +298,161 @@ class InferenceEngine:
             if i_url := user_c.get("image_url"):
                 cl.append({"type": "image_url", "image_url": {"url": i_url}})
             if t_c := user_c.get("text"):
-                # CLEANING: Remove newlines from User Text content
                 clean_text = re.sub(r"\s+", " ", t_c).strip()
                 cl.append({"type": "text", "text": clean_text})
             msgs.append({"role": "user", "content": cl})
         else:
-            # CLEANING: Remove newlines from simple User string content
             clean_user = re.sub(r"\s+", " ", str(user_c)).strip()
             msgs.append({"role": "user", "content": clean_user})
 
-        # 2. Determine effective seed
-        s_val = self.state.model.seed if self.state.model.seed is not None else -1
-        effective_seed = int(s_val) if int(s_val) >= 0 else 42
-
-        # 3. DIRECT OLLAMA CALL (Primary Strategy for Prompt Enhancing)
-        # We try this FIRST to bypass Open WebUI's session state pollution.
-        if task == "Prompt Enhancing":
-
-            # FIXME: Sistemare la risoluzione del base url di Ollama
-            # TODO: Cercare di capire se siamo agganciati ad Ollama o ad una API cloud
-
-            # Retrieve Ollama URL safely
-            ollama_url = getattr(
-                self.request.app.state.config,
-                "OLLAMA_API_BASE_URL",
-                "http://host.docker.internal:11434",
+        # 2. Determine Configuration
+        if creative_mode:
+            # User Intent Mode (Prompt Enhancing)
+            s_val = (
+                int(self.state.model.seed) if self.state.model.seed is not None else -1
             )
 
-            # Simple heuristic: If it's not obviously an external API model, try Ollama
-            is_likely_ollama = (
-                "gpt" not in self.state.model.id
-                and "dall-e" not in self.state.model.id
-                and "gemini" not in self.state.model.id
-            )
+            if s_val == -1:
+                # Random / Creative
+                seed = None
+                temperature = 0.7
+            else:
+                # User-forced Determinism
+                seed = s_val
+                temperature = 0.0
+        else:
+            # Technical Mode (Language Detect, Vision Audit)
+            # Must always be consistent regardless of user seed
+            seed = 42
+            temperature = 0.0
 
-            if ollama_url and is_likely_ollama:
-                try:
-                    # Construct single-string prompt for /api/generate
-                    final_ollama_prompt = ""
-                    if msgs[0]["role"] == "system":
-                        final_ollama_prompt += msgs[0]["content"] + " "
-
-                    if isinstance(msgs[-1]["content"], list):
-                        for part in msgs[-1]["content"]:
-                            if part.get("type") == "text":
-                                final_ollama_prompt += part.get("text")
-                    else:
-                        final_ollama_prompt += msgs[-1]["content"]
-
-                    ollama_payload = {
-                        "model": self.state.model.id,
-                        "prompt": final_ollama_prompt.strip(),
-                        "stream": False,
-                        # POWERSHELL VERIFIED DETERMINISTIC OPTIONS
-                        "options": {
-                            "seed": effective_seed,
-                            "temperature": 0.0,
-                            "top_k": 1,
-                            "num_ctx": 4096,
-                            "mirostat": 0,
-                        },
-                    }
-
-                    if self.state.model.debug:
-                        await self.emitter.emit_debug(
-                            f"TRYING DIRECT OLLAMA CALL: {ollama_url}"
-                        )
-                        await self.emitter.emit_debug(
-                            f"PAYLOAD: {json.dumps(ollama_payload, indent=2)}"
-                        )
-
-                    async with httpx.AsyncClient(
-                        timeout=self.state.valves.generation_timeout
-                    ) as client:
-                        response = await client.post(
-                            f"{ollama_url}/api/generate",
-                            json=ollama_payload,
-                            headers={"Content-Type": "application/json"},
-                        )
-                        response.raise_for_status()
-
-                        resp_json = response.json()
-                        cont = resp_json.get("response", "").strip()
-
-                        # CLEANING: Remove potential reasoning tags if model outputs them
-                        cont = cont.split("</think>")[-1].strip()
-
-                        self.state.register_stat(
-                            task, time.time() - start, len(cont.split())
-                        )
-                        return cont.strip('"').strip()
-
-                except Exception as e:
-                    # If Direct Call fails (e.g. model not found on Ollama, connection error),
-                    # Log it and fall through to standard generate_chat_completion
-                    if self.state.model.debug:
-                        await self.emitter.emit_debug(
-                            f"DIRECT OLLAMA FAILED (Fallback to Standard): {e}"
-                        )
-                    pass
-
-        # 4. STANDARD FALLBACK (via Open WebUI)
-        # Used if Direct Call failed or task is not Prompt Enhancing
-        payload = {
-            "model": self.state.model.id,
-            "messages": msgs,
-            "stream": False,
-            "seed": effective_seed,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": 1,
-            "options": {
-                "seed": effective_seed,
-                "temperature": 0.0,
-                "top_k": 1,
-                "num_ctx": 4096,
-                "mirostat": 0,
-            },
-        }
+        # 3. Dispatch
+        backend_type = getattr(self.state.model, "llm_type", "ollama")
 
         try:
-            resp = await generate_chat_completion(self.request, payload, self.user)
+            content = ""
+            usage_tokens = 0
 
-            if resp:
-                cont = resp["choices"][0]["message"].get("content", "").strip()
-                cont = cont.split("</think>")[-1].strip()
+            if backend_type == "ollama":
+                content, usage_tokens = await self._infer_ollama(
+                    msgs, seed, temperature
+                )
+            else:
+                content, usage_tokens = await self._infer_openai(
+                    msgs, seed, temperature
+                )
 
-                if task:
-                    self.state.register_stat(
-                        task,
-                        time.time() - start,
-                        resp.get("usage", {}).get("total_tokens", 0),
-                    )
+            content = content.split("</think>")[-1].strip()
+            content = content.strip('"').strip()
 
-                return cont.strip('"').strip()
+            if task:
+                self.state.register_stat(task, time.time() - start, usage_tokens)
 
-            return ""
+            return content
 
         except Exception as e:
+            await self.emitter.emit_debug(f"INFERENCE ERROR ({task}): {e}")
             print(f"Inference Error ({task}): {e}", file=sys.stderr)
             return ""
+
+    async def _infer_ollama(
+        self, messages: List[Dict], seed: Optional[int], temperature: float
+    ) -> Tuple[str, int]:
+        """Direct call to Ollama API with option encapsulation."""
+
+        config = self.request.app.state.config
+        base_urls = getattr(config, "OLLAMA_BASE_URLS", [])
+        base_url = base_urls[0] if base_urls else "http://host.docker.internal:11434"
+        base_url = base_url.rstrip("/")
+
+        # Construct Options
+        options = {
+            "temperature": temperature,
+            "num_ctx": 4096,
+            "mirostat": 0,
+        }
+
+        if seed is not None:
+            options["seed"] = seed
+            options["top_k"] = 1  # Strict sampling for determinism
+
+        payload = {
+            "model": self.state.model.id,
+            "messages": messages,
+            "stream": False,
+            "options": options,
+        }
+
+        if self.state.model.debug:
+            await self.emitter.emit_debug(f"OLLAMA DISPATCH: {base_url}/api/chat")
+            await self.emitter.emit_debug(f"PARAMS: temp={temperature}, seed={seed}")
+
+        async with httpx.AsyncClient(
+            timeout=self.state.valves.generation_timeout
+        ) as client:
+            response = await client.post(
+                f"{base_url}/api/chat",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            res_json = response.json()
+
+            return (
+                res_json.get("message", {}).get("content", ""),
+                res_json.get("eval_count", 0),
+            )
+
+    async def _infer_openai(
+        self, messages: List[Dict], seed: Optional[int], temperature: float
+    ) -> Tuple[str, int]:
+        """Direct call to OpenAI-compliant API."""
+
+        config = self.request.app.state.config
+        base_urls = getattr(config, "OPENAI_API_BASE_URLS", [])
+        api_keys = getattr(config, "OPENAI_API_KEYS", [])
+
+        base_url = base_urls[0] if base_urls else "https://api.openai.com/v1"
+        api_key = api_keys[0] if api_keys else ""
+        base_url = base_url.rstrip("/")
+
+        payload = {
+            "model": self.state.model.id,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+        }
+
+        if seed is not None:
+            payload["seed"] = seed
+            payload["top_p"] = 0.1  # Helps with determinism on OpenAI models
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        if self.state.model.debug:
+            await self.emitter.emit_debug(
+                f"OPENAI DISPATCH: {base_url}/chat/completions"
+            )
+            await self.emitter.emit_debug(f"PARAMS: temp={temperature}, seed={seed}")
+
+        async with httpx.AsyncClient(
+            timeout=self.state.valves.generation_timeout
+        ) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            res_json = response.json()
+
+            return (
+                res_json["choices"][0]["message"].get("content", ""),
+                res_json.get("usage", {}).get("completion_tokens", 0),
+            )
 
 
 class PromptParser:
@@ -644,6 +669,19 @@ class Filter:
             __request__,
             UserModel(**__user__),
         )
+
+        # --- NEW DISCOVERY LOGIC ---
+        # Detect Engine Type from Request Metadata for correct Dispatcher selection
+        try:
+            metadata = body.get("metadata", {})
+            # Look for model info in standard OWUI metadata structure
+            model_info = metadata.get("model", {})
+            # Default to 'ollama' if unknown, as it's the safest local assumption
+            self.st.model.llm_type = model_info.get("owned_by", "ollama")
+        except Exception:
+            self.st.model.llm_type = "ollama"
+        # ---------------------------
+
         self.inf, self.parser = InferenceEngine(
             self.request, self.user, self.st, self.em
         ), PromptParser(self.config)
@@ -734,8 +772,8 @@ class Filter:
                     )
                 )
 
-            self._dbg("SYSTEM PROMPT\n" + "".join(instructions))
-            self._dbg(f"USER PROMPT: {user_content}")
+            # self._dbg("SYSTEM PROMPT\n" + "".join(instructions))
+            # self._dbg(f"USER PROMPT: {user_content}")
 
             enh = await self.inf._infer(
                 task="Prompt Enhancing",
@@ -743,6 +781,7 @@ class Filter:
                     "system": "\n".join(instructions),
                     "user": user_content,
                 },
+                creative_mode=True,  # <--- CRUCIAL FIX
             )
             self.st.model.enhanced_prompt = (
                 re.sub(r"['\"]", "", enh) if enh else self.st.model.user_prompt
