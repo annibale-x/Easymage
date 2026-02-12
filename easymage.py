@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.0-alpha.8
+version: 0.9.0-alpha.10
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -238,7 +238,7 @@ class EasymageState:
             {
                 "trigger": None,
                 "vision": False,
-                "debug": valves.debug,
+                "debug": user_valves.debug,
                 "enhanced_prompt": user_valves.enhanced_prompt,
                 "quality_audit": user_valves.quality_audit,
                 "persistent_vision_cache": valves.persistent_vision_cache,
@@ -329,13 +329,18 @@ class EmitterService:
 class DebugService:
     """
     Handles logging to stderr and strictly controlled object dumping.
+    Updated to respect dynamic CLI overrides for debugging.
     """
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     def log(self, msg: str, is_error: bool = False):
-        if self.ctx.valves.debug or is_error:
+        st_debug = (
+            self.ctx.st.model.debug if self.ctx.st else self.ctx.user_valves.debug
+        )
+
+        if st_debug or is_error:
             if is_error:
                 print(f"\n\n❌ EASYMAGE ERROR: {msg}\n", file=sys.stderr, flush=True)
 
@@ -347,7 +352,11 @@ class DebugService:
         await self.ctx.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
 
     def dump(self, data: Any = None):
-        if not self.ctx.valves.debug:
+        st_debug = (
+            self.ctx.st.model.debug if self.ctx.st else self.ctx.user_valves.debug
+        )
+
+        if not st_debug:
             return
 
         header = "—" * 60 + "\n📦 EASYMAGE DUMP:\n" + "—" * 60
@@ -643,7 +652,8 @@ class ImageGenEngine:
 
     async def generate(self) -> str:
         """
-        Orchestrates the image generation process based on the selected engine.
+        Orchestrates the image generation process. Emits the image upon success.
+        Returns the generated image URL for reference.
         """
         await self.ctx.em.emit_status("Generating Image..")
         start = time.time()
@@ -656,30 +666,21 @@ class ImageGenEngine:
         try:
             if eng == E.OPENAI:
                 await self._gen_openai()
-
             elif eng == E.GEMINI:
                 await self._gen_gemini()
-
             elif eng == E.FORGE:
                 await self._gen_forge()
-
             else:
                 await self._gen_standard()
 
             self.ctx.st.image_gen_time_int = int(time.time() - start)
 
             if self.ctx.st.model.image_url:
+                # CRITICAL: Emit the image immediately for the user to see during audit.
                 await self.ctx.em.emit_message(
                     f"![Generated Image]({self.ctx.st.model.image_url})"
                 )
-
-                if self.ctx.st.model.debug:
-                    self.ctx.debug.log(
-                        f"Image generation successful: {self.ctx.st.model.image_url}"
-                    )
-
                 return self.ctx.st.model.image_url
-
             else:
                 raise Exception("No image URL returned")
 
@@ -1247,11 +1248,6 @@ class Filter:
             description="Maximum time in seconds allowed for the image generation API request.",
         )
 
-        debug: bool = Field(
-            default=False,
-            description="Enable verbose logging and surgical object dumping in the server console/logs.",
-        )
-
         # Default Auth Keys (Optional Fallback for Users)
         openai_auth: str = Field(
             default="",
@@ -1374,6 +1370,11 @@ class Filter:
         denoising_strength: float = Field(
             default=0.45,
             description="Controls how much the upscaler changes the original image.",
+        )
+
+        debug: bool = Field(
+            default=False,
+            description="Enable verbose logging and surgical object dumping in the server console/logs.",
         )
 
     def __init__(self):
@@ -1580,7 +1581,7 @@ class Filter:
                 m.engine = detected_engine
 
             # Task 4: In-Chat Dumps
-            if self.valves.debug:
+            if self.user_valves.debug:
                 self.st.output_content += f"```json\n{json.dumps(self.st.model, indent=2, default=str)}\n```\n"
                 self.st.output_content += f"```json\n{json.dumps(self.valves.model_dump(), indent=2, default=str)}\n```\n"
 
@@ -1597,11 +1598,20 @@ class Filter:
                 )
 
                 # Full Generation Mode
-                img_url = await self.img_gen.generate()
+                await self.img_gen.generate()
 
-                self.st.output_content += (
-                    f"![Generated Image]({img_url})\n\n[1] [2] [3]"
+                # BUGFIX (0.9.0-alpha.10):
+                # 1. Emit placeholders to Live Stream so citations [1][2][3] appear immediately.
+                await self.em.emit_message("\n\n[1] [2] [3]")
+
+                # 2. Include Image Markdown in Final Content so it survives Page Refresh (DB Persistence).
+                # Previous logic excluded it to prevent flicker, but caused data loss.
+                img_md = (
+                    f"![Generated Image]({self.st.model.image_url})"
+                    if self.st.model.image_url
+                    else ""
                 )
+                self.st.output_content = f"{img_md}\n\n[1] [2] [3]"
 
                 if self.st.model.quality_audit:
                     await self._vision_audit()
@@ -1781,7 +1791,7 @@ class Filter:
 
         tpl = (
             self.config.AUDIT_STRICT
-            if self.valves.strict_audit
+            if self.user_valves.strict_audit
             else self.config.AUDIT_STANDARD
         )
 
@@ -1913,24 +1923,24 @@ class Filter:
         # Construct Plain Text Body (No Markdown formatting like ** or *)
         tech = f"""
 ⚙️ Configuration
-• Model: {self.st.model.model}
-• Engine: {engine_name}{cloud_info}
+→ Model: {self.st.model.model}
+→ Engine: {engine_name}{cloud_info}
 {auth_info_line}
 
 🎨 Parameters
-• Size: {self.st.model.size} (AR: {self.st.model.aspect_ratio})
-• Steps: {self.st.model.get('steps')}
-• Guidance: {self.st.model.get('cfg_scale')} (Distilled: {self.st.model.get('distilled_cfg_scale')})
-• Seed: {self.st.model.seed}
-• Sampler: {self.st.model.get('sampler_name')} / {self.st.model.get('scheduler')}
+→ Size: {self.st.model.size} (AR: {self.st.model.aspect_ratio})
+→ Steps: {self.st.model.get('steps')}
+→ Guidance: {self.st.model.get('cfg_scale')} (Distilled: {self.st.model.get('distilled_cfg_scale')})
+→ Seed: {self.st.model.seed}
+→ Sampler: {self.st.model.get('sampler_name')} / {self.st.model.get('scheduler')}
 
 ⚡ Execution
-• VRAM Purge: {self.valves.extreme_vram_cleanup}
-• Vision Cache: {self.valves.persistent_vision_cache}
+→ VRAM Purge: {self.valves.extreme_vram_cleanup}
+→ Vision Cache: {self.valves.persistent_vision_cache}
 
 ⏱️ Performance
-• Total Time: {total}s
-• Image Gen: {self.st.image_gen_time_int}s
+→ Total Time: {total}s
+→ Image Gen: {self.st.image_gen_time_int}s
 {chr(10).join(self.st.performance_stats)}
 """
 
