@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.19
+version: 0.8.20
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -437,9 +437,11 @@ class InferenceEngine:
         Constructs and sends the payload to an Ollama-compatible API.
         Enforces strict parameter isolation within the 'options' dict.
         """
-        conf = self.ctx.request.app.state.config
-        base_urls = getattr(conf, "OLLAMA_BASE_URLS", [])
-        base_url = base_urls[0].rstrip("/") if base_urls else "http://localhost:11434"
+        base_urls = getattr(self.ctx.request.app.state.config, "OLLAMA_BASE_URLS", [])
+        if not base_urls:
+            raise Exception("Ollama Base URL is missing from Open WebUI configuration.")
+
+        base_url = base_urls[0].rstrip("/")
 
         # Build the Ollama-specific payload from the generic data structure
         messages = []
@@ -459,7 +461,6 @@ class InferenceEngine:
 
         options = {
             "temperature": temperature,
-            "num_ctx": 4096,
             "mirostat": 0,
         }
 
@@ -499,12 +500,15 @@ class InferenceEngine:
         Constructs and sends the payload to an OpenAI-compatible API.
         Handles image formatting for GPT-4-Vision style endpoints.
         """
+
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OPENAI_API_BASE_URLS", [])
+
+        if not base_urls:
+            raise Exception("OpenAI Base URL is missing from Open WebUI configuration.")
+
+        base_url = base_urls[0].rstrip("/")
         api_keys = getattr(conf, "OPENAI_API_KEYS", [])
-        base_url = (
-            base_urls[0].rstrip("/") if base_urls else "https://api.openai.com/v1"
-        )
         api_key = api_keys[0] if api_keys else ""
 
         # Build the OpenAI-specific payload from the generic data structure
@@ -530,6 +534,7 @@ class InferenceEngine:
         user_content = (
             content_parts if image_data else (inference_data.get("user_prompt") or "")
         )
+
         messages.append({"role": "user", "content": user_content})
 
         payload = {
@@ -542,6 +547,7 @@ class InferenceEngine:
         if seed is not None:
             payload["seed"] = seed
 
+        # Standard headers for OpenAI authentication
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -552,19 +558,67 @@ class InferenceEngine:
                 f"OPENAI: {base_url}/chat/completions (s:{seed} t:{temperature})"
             )
 
+        # Async request via global connection pool
         r = await HTTP_CLIENT.post(
             f"{base_url}/chat/completions",
             json=payload,
             headers=headers,
             timeout=self.ctx.valves.generation_timeout,
         )
+
         r.raise_for_status()
         res = r.json()
+
         return (
             res["choices"][0]["message"].get("content", ""),
             res.get("usage", {}).get("completion_tokens", 0),
         )
 
+    async def purge_vram(self, unload_all: bool = False):
+        """
+        Cleans up the VRAM by unloading models from Ollama.
+        Always unloads all models except the one currently in use, 
+        unless 'unload_all' is True.
+        """
+        if self.ctx.st.model.llm_type != "ollama":
+            return
+
+        base_urls = getattr(self.ctx.request.app.state.config, "OLLAMA_BASE_URLS", [])
+
+        if not base_urls:
+            await self.ctx.debug.error("VRAM Purge failed: Ollama Base URL not found.")
+            return
+
+        base_url = base_urls[0].rstrip("/")
+
+        try:
+            # 1. Fetch currently loaded models from the Ollama server
+            r_ps = await HTTP_CLIENT.get(f"{base_url}/api/ps")
+            r_ps.raise_for_status()
+            loaded_models = r_ps.json().get("models", [])
+            
+            current_model = self.ctx.st.model.id
+
+            # 2. Iterate and unload targeted models
+            for m in loaded_models:
+                m_name = m.get("name")
+
+                # Optimization: skip current model unless extreme cleanup is requested
+                if not unload_all and m_name == current_model:
+                    continue
+
+                # Sending keep_alive: 0 effectively evicts the model from VRAM
+                await HTTP_CLIENT.post(
+                    f"{base_url}/api/chat",
+                    json={"model": m_name, "keep_alive": 0},
+                    timeout=5
+                )
+                
+                self.ctx.debug.log(f"VRAM Purge: Evicted model {m_name}")
+
+        except Exception as e:
+            # Use the dedicated EM error service to notify the UI and log to stderr
+            await self.ctx.debug.error(f"VRAM Purge failed: {str(e)}")
 
 class ImageGenEngine:
     """
@@ -950,9 +1004,13 @@ class Filter:
         quality_audit: bool = Field(default=True)
         strict_audit: bool = Field(default=False)
         persistent_vision_cache: bool = Field(default=False)
+        extreme_vram_cleanup: bool = Field(
+            default=False, 
+            description="If True, unloads the current LLM as well. If False (default), only unloads other idle models."
+        )
+        generation_timeout: int = Field(default=120)
         debug: bool = Field(default=False)
         model: Optional[str] = Field(default=None)
-        generation_timeout: int = Field(default=120)
         steps: int = 20
         size: str = "1024x1024"
         aspect_ratio: str = "1:1"
@@ -1026,6 +1084,11 @@ class Filter:
                 self.st.output_content = self.st.model.enhanced_prompt
                 self.st.executed = True
             else:
+
+                # Ensure the GPU is clear of 'ghost' models before calling Forge/Comfy
+                await self.em.emit_status("Cleaning VRAM..")
+                await self.inf.purge_vram(unload_all=self.valves.extreme_vram_cleanup)
+
                 # Full Generation Mode
                 await self.img_gen.generate()
                 # Save the image reference to the buffer immediately
@@ -1098,9 +1161,7 @@ class Filter:
         if self.st and self.st.model.llm_type == "ollama":
             if "options" not in body:
                 body["options"] = {}
-            body["options"].update(
-                {"num_predict": 1, "temperature": 0.0, "num_ctx": 128}
-            )
+            body["options"].update({"num_predict": 1, "temperature": 0.0})
 
         return body
 
