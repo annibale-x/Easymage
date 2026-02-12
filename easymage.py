@@ -1,12 +1,14 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.16
+version: 0.8.19
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
 author_email: annibale.x@gmail.com
 Description: Image generation filter and prompt enhancer for Open WebUI with deterministic control.
 """
+
+# --- IMPORTS ---
 
 import json
 import re
@@ -22,11 +24,21 @@ from open_webui.models.users import UserModel  # type: ignore
 
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
+# --- GLOBAL SERVICES ---
+
+# Create a global client for connection pooling if not exists
+# This further reduces latency on high-end systems by keeping sockets open.
+HTTP_CLIENT = httpx.AsyncClient(timeout=120)
+
+
 # --- CONFIGURATION & MAPS ---
 
 
 class EasymageConfig:
-    """Static mappings and prompt templates."""
+    """
+    Static mappings, configuration constants, and prompt templates used throughout the application.
+    Acts as a central registry for engine-specific parameters and normalization maps.
+    """
 
     class Engines:
         FORGE = "automatic1111"
@@ -34,6 +46,7 @@ class EasymageConfig:
         GEMINI = "gemini"
         COMFY = "comfyui"
 
+    # Maps short codes or alternative names to the specific sampler names required by backends (mostly A1111/Forge).
     SAMPLER_MAP = {
         "d3s": "DPM++ 3M SDE",
         "d2sh": "DPM++ 2M SDE Heun",
@@ -61,6 +74,7 @@ class EasymageConfig:
         "dp": "DDPM",
     }
 
+    # Maps short codes to scheduler names.
     SCHEDULER_MAP = {
         "a": "Automatic",
         "u": "Uniform",
@@ -80,6 +94,7 @@ class EasymageConfig:
         "t": "Turbo",
     }
 
+    # Mapping between internal engine constants and the configuration keys expected in Open WebUI state.
     ENGINE_MAP = {
         Engines.FORGE: ["AUTOMATIC1111_BASE_URL", "AUTOMATIC1111_PARAMS"],
         Engines.COMFY: ["COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"],
@@ -88,6 +103,8 @@ class EasymageConfig:
     }
 
     # PROMPT TEMPLATES
+
+    # Template for standard vision analysis without strict penalty rules.
     AUDIT_STANDARD = """
         RESET: ####################### NEW DATA STREAM ##########################
         ENVIRONMENT: STATELESS SANDBOX.
@@ -104,6 +121,7 @@ class EasymageConfig:
         MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
 
+    # Template for strict vision analysis, penalizing hallucinations and negative prompt violations severely.
     AUDIT_STRICT = """
         RESET: ####################### NEW DATA STREAM ##########################            
         ENVIRONMENT: STATELESS SANDBOX.
@@ -129,21 +147,25 @@ class EasymageConfig:
         SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
 
+    # Base prompt for the LLM to enhance the user's short description.
     PROMPT_ENHANCE_BASE = """
         ROLE: You are an expert AI Image Prompt Engineer.
         TASK: Expand the user's input into a professional, highly detailed prompt in {lang}.
         TASK: Add details about lighting, camera angle, textures, environment, and artistic style.
     """
 
+    # Injection for specific artistic styles requested by user.
     PROMPT_ENHANCE_STYLES = """
         MANDATORY: Incorporate these style elements naturally into the description: {styles}.
     """
 
+    # Injection for negative constraints.
     PROMPT_ENHANCE_NEG = """
         MANDATORY: The description must explicitly ensure that {negative} are NOT present. If necessary, 
         describe the scene in a way that confirms their absence.
     """
 
+    # Formatting rules to ensure the LLM output is clean for the image generator.
     PROMPT_ENHANCE_RULES = """
         RULE: Output ONLY the enhanced prompt.
         RULE: End the response immediately after the last descriptive sentence.
@@ -155,7 +177,10 @@ class EasymageConfig:
 
 
 class Store(dict):
-    """Dynamic dictionary storage with dot notation access."""
+    """
+    Dynamic dictionary storage allowing dot notation access.
+    Used for holding the Easymage state model.
+    """
 
     def __getattr__(self, item):
         try:
@@ -168,9 +193,13 @@ class Store(dict):
 
 
 class EasymageState:
-    """Manages internal state, configuration, and performance tracking."""
+    """
+    Manages the internal state for a single request lifecycle.
+    Holds configuration, performance metrics, and generation results.
+    """
 
     def __init__(self, valves):
+        # Initialize the core model with default valve settings and empty triggers.
         self.model = Store(
             {
                 "trigger": None,
@@ -190,11 +219,17 @@ class EasymageState:
         self.image_gen_time_int = 0
         self.quality_audit_results = {"score": None, "critique": None, "emoji": "⚪"}
         self.vision_cache = {}
+        self.output_content = ""
+        self.executed = False
 
     def register_stat(self, stage_name: str, elapsed: float, token_count: int = 0):
+        """
+        Records performance metrics for a specific processing stage.
+        """
         self.cumulative_tokens += token_count
         self.cumulative_elapsed_time += elapsed
         tps = token_count / elapsed if elapsed > 0 else 0
+
         self.performance_stats.append(
             f"  → {stage_name}: {int(elapsed)}s | {token_count} tk | {tps:.1f} tk/s"
         )
@@ -204,27 +239,42 @@ class EasymageState:
 
 
 class EmitterService:
-    """Handles communication with event emitter."""
+    """
+    Handles asynchronous communication with the Open WebUI event emitter.
+    Used to send status updates, generated images, and citations to the chat UI.
+    """
 
     def __init__(self, event_emitter):
         self.emitter = event_emitter
 
     async def emit_message(self, content: str):
+        """
+        Emits a standard text message or markdown content to the chat.
+        Handles formatting for code blocks.
+        """
         if self.emitter:
             fmt = (
                 content.replace("```", "```\n") if content.endswith("```") else content
             )
+
             if "```" in content:
                 fmt = re.sub(r"(```[^\n]*\n.*?\n```)", r"\1\n", fmt, flags=re.DOTALL)
+
             await self.emitter({"type": "message", "data": {"content": fmt}})
 
     async def emit_status(self, description: str, done: bool = False):
+        """
+        Updates the status indicator in the UI (e.g., "Generating Image...").
+        """
         if self.emitter:
             await self.emitter(
                 {"type": "status", "data": {"description": description, "done": done}}
             )
 
     async def emit_citation(self, name: str, document: str, source: str, cid: str):
+        """
+        Emits a citation block, used here to display metadata and audit results neatly.
+        """
         if self.emitter:
             await self.emitter(
                 {
@@ -239,13 +289,19 @@ class EmitterService:
 
 
 class DebugService:
-    """Handles stderr logging, error reporting, and safe object dumping."""
+    """
+    Handles logging to stderr and strictly controlled object dumping.
+    Ensures Pydantic models and Starlette configuration objects are readable.
+    """
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     def log(self, msg: str, is_error: bool = False):
-        """Prints diagnostic logs to standard error for Docker logs visibility."""
+        """
+        Prints diagnostic logs to standard error for Docker/Console visibility.
+        Only logs if debug mode is enabled in valves, unless it is an error.
+        """
         if self.ctx.valves.debug or is_error:
             if is_error:
                 print(f"\n\n❌ EASYMAGE ERROR: {msg}\n", file=sys.stderr, flush=True)
@@ -253,14 +309,17 @@ class DebugService:
                 print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
 
     async def error(self, e: Any):
-        """Logs exceptions and notifies the chat UI of critical filter errors."""
+        """
+        Logs exceptions and notifies the chat UI of critical filter errors.
+        """
         self.log(str(e), is_error=True)
         await self.ctx.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
 
     def dump(self, data: Any = None):
         """
-        Indestructible Surgical Dumper
-        Handles the new PersistentConfig objects from Open WebUI
+        Indestructible Surgical Dumper.
+        Introspects objects to handle Open WebUI's 'PersistentConfig' and Pydantic models
+        without crashing on serialization.
         """
         if not self.ctx.valves.debug:
             return
@@ -269,13 +328,13 @@ class DebugService:
         print(header, file=sys.stderr, flush=True)
 
         def universal_resolver(obj):
-            # Intercept Open WebUI PersistentConfig objects
+            # Intercept Open WebUI PersistentConfig objects which hold data in .value
             if hasattr(obj, "value"):
                 return obj.value
-            # Intercept Pydantic models
+            # Intercept Pydantic models for serialization
             if hasattr(obj, "model_dump"):
                 return obj.model_dump()
-            # Fallback
+            # Fallback for unknown types
             return str(obj)
 
         try:
@@ -288,7 +347,10 @@ class DebugService:
 
 
 class InferenceEngine:
-    """Handles LLM interactions (Text & Vision) with context access."""
+    """
+    Abstracts LLM interactions for both Text and Vision tasks.
+    Supports switching between Ollama and OpenAI backends based on configuration.
+    """
 
     def __init__(self, ctx):
         self.ctx = ctx  # Access to Filter instance
@@ -296,11 +358,16 @@ class InferenceEngine:
     async def _infer(
         self, task: Optional[str], data: Dict[str, Any], creative_mode: bool = False
     ) -> str:
+        """
+        Main entry point for LLM inference.
+        Standardizes input data, manages timing/stats, and dispatches to specific backend.
+        """
         start = time.time()
+
         if task:
             await self.ctx.em.emit_status(f"{task}..")
 
-        # 1. Prepare a generic, abstract data structure
+        # 1. Prepare a generic, abstract data structure for the prompt
         inference_data = {
             "system_prompt": None,
             "user_prompt": None,
@@ -311,19 +378,22 @@ class InferenceEngine:
             inference_data["system_prompt"] = re.sub(r"\s+", " ", sys_c).strip()
 
         user_c = data.get("user")
+
         if isinstance(user_c, dict):
-            # This is a multimodal request
+            # Handle multimodal request (Text + Image)
             if i_url := user_c.get("image_url"):
-                # CORRECTED LOGIC: Treat i_url as a string and extract base64 data.
+                # Extract base64 data from data URI
                 inference_data["image_b64"] = i_url.split(",")[-1]
+
             if t_c := user_c.get("text"):
                 inference_data["user_prompt"] = re.sub(r"\s+", " ", t_c).strip()
         else:
-            # Text-only request
+            # Handle text-only request
             inference_data["user_prompt"] = re.sub(r"\s+", " ", str(user_c)).strip()
 
-        # 2. Configure Determinism (same as before)
+        # 2. Configure Determinism parameters
         if creative_mode:
+            # Creative mode uses high temperature and respects user seed if present
             temperature = 0.7
             s_val = (
                 int(self.ctx.st.model.seed)
@@ -332,9 +402,10 @@ class InferenceEngine:
             )
             seed = None if s_val == -1 else s_val
         else:
+            # Analytical mode uses 0 temp and fixed seed
             seed, temperature = 42, 0.0
 
-        # 3. Dispatch to the specific engine builder
+        # 3. Dispatch to the specific engine builder based on model ownership
         backend_type = getattr(self.ctx.st.model, "llm_type", "ollama")
 
         try:
@@ -347,6 +418,7 @@ class InferenceEngine:
                     inference_data, seed, temperature
                 )
 
+            # Clean up thinking tokens (common in reasoning models)
             content = content.split("</think>")[-1].strip().strip('"').strip()
 
             if task:
@@ -361,12 +433,17 @@ class InferenceEngine:
     async def _infer_ollama(
         self, inference_data: Dict, seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
+        """
+        Constructs and sends the payload to an Ollama-compatible API.
+        Enforces strict parameter isolation within the 'options' dict.
+        """
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OLLAMA_BASE_URLS", [])
         base_url = base_urls[0].rstrip("/") if base_urls else "http://localhost:11434"
 
         # Build the Ollama-specific payload from the generic data structure
         messages = []
+
         if sys_prompt := inference_data.get("system_prompt"):
             messages.append({"role": "system", "content": sys_prompt})
 
@@ -406,20 +483,22 @@ class InferenceEngine:
                 )
                 self.ctx.debug.dump(payload)
 
-        async with httpx.AsyncClient(
-            timeout=self.ctx.valves.generation_timeout
-        ) as client:
-            r = await client.post(f"{base_url}/api/chat", json=payload)
-            r.raise_for_status()
-            res = r.json()
-            return (
-                res.get("message", {}).get("content", ""),
-                res.get("eval_count", 0),
-            )
+        r = await HTTP_CLIENT.post(f"{base_url}/api/chat", json=payload)
+        # r = await client.post(f"{base_url}/api/chat", json=payload)
+        r.raise_for_status()
+        res = r.json()
+        return (
+            res.get("message", {}).get("content", ""),
+            res.get("eval_count", 0),
+        )
 
     async def _infer_openai(
         self, inference_data: Dict, seed: Optional[int], temperature: float
     ) -> Tuple[str, int]:
+        """
+        Constructs and sends the payload to an OpenAI-compatible API.
+        Handles image formatting for GPT-4-Vision style endpoints.
+        """
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OPENAI_API_BASE_URLS", [])
         api_keys = getattr(conf, "OPENAI_API_KEYS", [])
@@ -430,10 +509,12 @@ class InferenceEngine:
 
         # Build the OpenAI-specific payload from the generic data structure
         messages = []
+
         if sys_prompt := inference_data.get("system_prompt"):
             messages.append({"role": "system", "content": sys_prompt})
 
         content_parts = []
+
         if user_prompt := inference_data.get("user_prompt"):
             content_parts.append({"type": "text", "text": user_prompt})
 
@@ -471,33 +552,41 @@ class InferenceEngine:
                 f"OPENAI: {base_url}/chat/completions (s:{seed} t:{temperature})"
             )
 
-        async with httpx.AsyncClient(
-            timeout=self.ctx.valves.generation_timeout
-        ) as client:
-            r = await client.post(
-                f"{base_url}/chat/completions", json=payload, headers=headers
-            )
-            r.raise_for_status()
-            res = r.json()
-            return (
-                res["choices"][0]["message"].get("content", ""),
-                res.get("usage", {}).get("completion_tokens", 0),
-            )
+        r = await HTTP_CLIENT.post(
+            f"{base_url}/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=self.ctx.valves.generation_timeout,
+        )
+        r.raise_for_status()
+        res = r.json()
+        return (
+            res["choices"][0]["message"].get("content", ""),
+            res.get("usage", {}).get("completion_tokens", 0),
+        )
 
 
 class ImageGenEngine:
-    """Handles image generation logic with direct context access."""
+    """
+    Handles the actual image generation request dispatch.
+    Supports Automatic1111 (Forge), OpenAI DALL-E, Gemini, and Standard Open WebUI generation.
+    """
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     async def generate(self) -> str:
+        """
+        Orchestrates the image generation process based on the selected engine.
+        Updates state with the generated image URL and B64 data.
+        """
         await self.ctx.em.emit_status("Generating Image..")
         start = time.time()
         eng = self.ctx.st.model.engine
         E = self.ctx.config.Engines
 
         try:
+            # Dispatch to appropriate handler
             if eng == E.OPENAI:
                 await self._gen_openai()
             elif eng == E.GEMINI:
@@ -509,6 +598,7 @@ class ImageGenEngine:
 
             self.ctx.st.image_gen_time_int = int(time.time() - start)
 
+            # Notify the UI if successful
             if self.ctx.st.model.image_url:
                 await self.ctx.em.emit_message(
                     f"![Generated Image]({self.ctx.st.model.image_url})"
@@ -523,16 +613,23 @@ class ImageGenEngine:
     # --- PAYLOAD BUILDERS ---
 
     def _prepare_forge(self) -> dict:
+        """
+        Builds the payload for Automatic1111/Forge API.
+        Cleans the internal state dictionary to remove non-SD parameters.
+        """
         p = self.ctx.st.model.copy()
         p["prompt"] = p["enhanced_prompt"]
+
         if not p.get("enable_hr"):
             p["negative_prompt"] = ""
+
         try:
             w, h = map(int, p.get("size", "1024x1024").split("x"))
             p["width"], p["height"] = w, h
         except:
             p["width"], p["height"] = 1024, 1024
 
+        # Remove internal Easymage keys that the backend doesn't understand
         for k in [
             "trigger",
             "id",
@@ -555,6 +652,9 @@ class ImageGenEngine:
         return p
 
     def _prepare_openai(self) -> dict:
+        """
+        Builds the payload for OpenAI DALL-E API.
+        """
         m = self.ctx.st.model
         return {
             "model": m.model or "dall-e-3",
@@ -568,6 +668,10 @@ class ImageGenEngine:
         }
 
     def _prepare_gemini(self) -> dict:
+        """
+        Builds the payload for Google Gemini Image Generation.
+        Calculates aspect ratio strings from dimensions.
+        """
         m = self.ctx.st.model
         try:
             w, h = map(int, (m.size or "1024x1024").split("x"))
@@ -594,6 +698,7 @@ class ImageGenEngine:
             "includeReasoning": False,
             "outputOptions": {"mimeType": "image/png"},
         }
+
         if m.seed and m.seed != -1:
             params["seed"] = m.seed
 
@@ -602,11 +707,15 @@ class ImageGenEngine:
     # --- HTTP HANDLERS ---
 
     async def _gen_forge(self):
+        """
+        Executes request against Automatic1111/Forge txt2img endpoint.
+        """
         payload = self._prepare_forge()
         conf = self.ctx.request.app.state.config
         url = conf.AUTOMATIC1111_BASE_URL.rstrip("/")
         auth = conf.AUTOMATIC1111_API_AUTH
         headers = {}
+
         if auth:
             headers["Authorization"] = (
                 f"Basic {base64.b64encode(auth.encode()).decode()}"
@@ -614,40 +723,45 @@ class ImageGenEngine:
                 else f"Bearer {auth}"
             )
 
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                f"{url}/sdapi/v1/txt2img",
-                json=payload,
-                headers=headers,
-                timeout=self.ctx.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            res = r.json()
+        r = await HTTP_CLIENT.post(
+            f"{url}/sdapi/v1/txt2img",
+            json=payload,
+            headers=headers,
+            timeout=self.ctx.valves.generation_timeout,
+        )
+        r.raise_for_status()
+        res = r.json()
 
         img = res["images"][0].split(",")[-1]
         self.ctx.st.model.b64_data = img
         self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
 
     async def _gen_openai(self):
+        """
+        Executes request against OpenAI images/generations endpoint.
+        """
         payload = self._prepare_openai()
         conf = self.ctx.request.app.state.config
         headers = {
             "Authorization": f"Bearer {conf.IMAGES_OPENAI_API_KEY}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                f"{conf.IMAGES_OPENAI_API_BASE_URL}/images/generations",
-                json=payload,
-                headers=headers,
-                timeout=self.ctx.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            img = r.json()["data"][0]["b64_json"]
-            self.ctx.st.model.b64_data = img
-            self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+
+        r = await HTTP_CLIENT.post(
+            f"{conf.IMAGES_OPENAI_API_BASE_URL}/images/generations",
+            json=payload,
+            headers=headers,
+            timeout=self.ctx.valves.generation_timeout,
+        )
+        r.raise_for_status()
+        img = r.json()["data"][0]["b64_json"]
+        self.ctx.st.model.b64_data = img
+        self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
 
     async def _gen_gemini(self):
+        """
+        Executes request against Google VertexAI/Gemini predict endpoint.
+        """
         payload = self._prepare_gemini()
         conf = self.ctx.request.app.state.config
         url = f"{conf.IMAGES_GEMINI_API_BASE_URL}/models/{self.ctx.st.model.model}:predict"
@@ -655,19 +769,22 @@ class ImageGenEngine:
             "Content-Type": "application/json",
             "x-goog-api-key": conf.IMAGES_GEMINI_API_KEY,
         }
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.ctx.valves.generation_timeout,
-            )
-            r.raise_for_status()
-            img = r.json()["predictions"][0]["bytesBase64Encoded"]
-            self.ctx.st.model.b64_data = img
-            self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+
+        r = await HTTP_CLIENT.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=self.ctx.valves.generation_timeout,
+        )
+        r.raise_for_status()
+        img = r.json()["predictions"][0]["bytesBase64Encoded"]
+        self.ctx.st.model.b64_data = img
+        self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
 
     async def _gen_standard(self):
+        """
+        Falls back to the standard Open WebUI image generation router.
+        """
         form = CreateImageForm(
             prompt=self.ctx.st.model.enhanced_prompt,
             n=1,
@@ -675,42 +792,58 @@ class ImageGenEngine:
             model=self.ctx.st.model.model,
         )
         gen = await image_generations(self.ctx.request, form, self.ctx.user)
+
         if gen:
             self.ctx.st.model.image_url = gen[0]["url"]
 
 
 class PromptParser:
-    """Regex based input parsing directly modifying state model."""
+    """
+    Parses user input using Regex to extract command flags and key-value pairs.
+    Directly modifies the EasymageState model.
+    """
 
     def __init__(self, ctx):
         self.ctx = ctx
         self.config = ctx.config
 
     def parse(self, user_prompt: str):
+        """
+        Analyzes the raw user string.
+        1. Splits negative prompt (after --no).
+        2. Separates parameter block from description.
+        3. Parses KV pairs (e.g., ar=16:9) and flags (e.g., +d).
+        """
         m_st = self.ctx.st.model  # Direct state access
         clean, neg = user_prompt, ""
 
+        # Split Negative Prompt
         if " --no " in clean.lower():
             clean, neg = re.split(r" --no ", clean, maxsplit=1, flags=re.IGNORECASE)
 
+        # Split Parameters from Prompt Description
         if " -- " in clean:
             prefix, subj = clean.split(" -- ", 1)
         else:
+            # Detect parameter block end via regex looking for key=value or flags
             pat = r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)'
             matches = list(re.finditer(pat, clean))
             idx = matches[-1].end() if matches else 0
             prefix, subj = clean[:idx], clean[idx:].strip()
 
+        # Isolate the style string
         rem_styles = re.sub(
             r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)', "", prefix
         ).strip()
         rem_styles = re.sub(r"^[\s,]+|[\s,]+$", "", rem_styles)
 
-        # Parse Pairs
+        # Parse Key-Value Pairs
         kv_pat = r'(\b\w+)=("([^"]*)"|(\S+))'
+
         for k, _, q, u in re.findall(kv_pat, prefix):
             k, v = k.lower(), (q if q else u).lower()
             try:
+                # Map short keys to state model keys
                 if k == "ge":
                     m_st["engine"] = {
                         "a": self.config.Engines.FORGE,
@@ -763,7 +896,7 @@ class PromptParser:
             except ValueError:
                 continue
 
-        # Parse Flags
+        # Parse Boolean Flags (+d, -p, etc.)
         for flag in re.findall(r"(?<!\w)([+-][dpah])(?!\w)", prefix):
             v, char = flag[0] == "+", flag[1]
             if char == "d":
@@ -784,6 +917,9 @@ class PromptParser:
         )
 
     def _norm(self, name, mapping):
+        """
+        Normalizes loose input strings to exact mapping keys.
+        """
         n = (
             name.lower()
             .replace("_", "")
@@ -800,7 +936,16 @@ class PromptParser:
 
 
 class Filter:
+    """
+    Main entry point for the Open WebUI Filter system.
+    Orchestrates the entire flow: Input interception -> LLM Silence -> Logic Execution -> Output Injection.
+    """
+
     class Valves(BaseModel):
+        """
+        User-configurable settings available in the Open WebUI interface.
+        """
+
         enhanced_prompt: bool = Field(default=True)
         quality_audit: bool = Field(default=True)
         strict_audit: bool = Field(default=False)
@@ -825,6 +970,8 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
         self.config = EasymageConfig()
+        # Explicit type hinting for Pyright: st can be EasymageState or None
+        self.st: EasymageState = None  # type: ignore
 
     async def inlet(
         self,
@@ -833,58 +980,135 @@ class Filter:
         __request__=None,
         __event_emitter__=None,
     ) -> dict:
-        """Entry Point. Acts as the Context Container for all sub-engines."""
-
+        """
+        Intercepts the incoming request before it reaches the LLM.
+        Decides if Easymage should trigger ('img' or 'imgx').
+        If triggered, silences the actual LLM and runs the generation logic internally.
+        """
         trigger_data = self._check_input(body)
+
         if not trigger_data:
+            self.st = None
             return body
 
         trigger, raw_p = trigger_data
 
-        # 1. SETUP CONTEXT (The Filter itself is the Context)
+        # 1. IMMEDIATE STATE CREATION
         self.request = __request__
         self.user = UserModel(**__user__)
         self.st = EasymageState(self.valves)
-        self.em = EmitterService(__event_emitter__)
         self.st.model.trigger = trigger
+        self.em = EmitterService(__event_emitter__)
 
-        # Metadata Discovery
+        # Metadata Discovery (Required for _suppress_output context)
         try:
             metadata = body.get("metadata", {})
             self.st.model.llm_type = metadata.get("model", {}).get("owned_by", "ollama")
         except:
             self.st.model.llm_type = "ollama"
 
-        # 2. INITIALIZE WORKERS (Passing 'self' as Context)
-        # Note: DebugService comes first to handle early errors if needed
+        # 2. IMMEDIATE SUPPRESSION (Neutralize the LLM while EM works)
+        body = self._suppress_output(body)
+
+        # 3. WORKER INITIALIZATION
         self.debug = DebugService(self)
         self.inf = InferenceEngine(self)
         self.img_gen = ImageGenEngine(self)
         self.parser = PromptParser(self)
 
         try:
-            # 3. CONTEXT POPULATION & LOGIC
+            # 4. LOGIC EXECUTION
             await self._setup_context(body, raw_p)
 
-            if self.st.model.debug:
-                self.debug.log(f"STATE: {json.dumps(self.st.model, indent=2)}")
-
-            # 4. EXECUTION
+            # Fork logic based on trigger type
             if self.st.model.trigger == "imgx":
-                await self.em.emit_message(self.st.model.enhanced_prompt)
-                await self._output_status_only()
+                # Prompt Engineering Mode only
+                self.st.output_content = self.st.model.enhanced_prompt
+                self.st.executed = True
             else:
+                # Full Generation Mode
                 await self.img_gen.generate()
-                await self._vision_audit()
-                await self._output_delivery()
+                # Save the image reference to the buffer immediately
+                self.st.output_content = (
+                    f"![Generated Image]({self.st.model.image_url})"
+                )
+
+                if self.st.model.quality_audit:
+                    await self._vision_audit()
+
+                # Add citation placeholders for outlet to fill
+                self.st.output_content += "\n\n[1] [2] [3]"
+                self.st.executed = True
 
         except Exception as e:
             await self.debug.error(e)
+            if self.st:
+                self.st.executed = True  # Allows the outlet to display the error
 
-        # self.debug.dump(self.st.model)
-        return self._suppress_output(body)
+        return body  # body has already been modified by _suppress_output
+
+    async def outlet(
+        self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
+    ) -> dict:
+        """
+        Intercepts the LLM's response (which is just empty space/silence).
+        Replaces the silence with the actual content generated by Easymage.
+        Delivers citations/status updates.
+        """
+
+        if getattr(self, "st", None) is None or not self.st.executed:
+            return body
+
+        if not self.st.model.trigger:
+            return body
+
+        if __event_emitter__:
+            self.em.emitter = __event_emitter__
+
+        # FINAL OVERWRITE
+        # Whatever the LLM generated (the invisible space), is now replaced by EM's definitive content.
+        if "messages" in body and len(body["messages"]) > 0:
+            body["messages"][-1]["content"] = self.st.output_content
+
+        if self.st.model.trigger == "imgx":
+            await self._output_status_only()
+        else:
+            await self._output_delivery()
+
+        return body
+
+    def _suppress_output(self, body: dict) -> dict:
+        """
+        Force the LLM to be completely silent using invisible characters
+        and strict system instructions. Prevents double-response issues.
+        """
+        body["messages"] = [
+            {
+                "role": "system",
+                "content": "Respond only with ' ' (one space). No text.",
+            },
+            {"role": "user", "content": "\u200b"},
+        ]
+
+        body["max_tokens"] = 1
+        body["stream"] = True
+        body["stop"] = [chr(i) for i in range(128)]
+
+        # Specific handling for Ollama to minimize resource usage
+        if self.st and self.st.model.llm_type == "ollama":
+            if "options" not in body:
+                body["options"] = {}
+            body["options"].update(
+                {"num_predict": 1, "temperature": 0.0, "num_ctx": 128}
+            )
+
+        return body
 
     async def _setup_context(self, body: dict, user_prompt: str):
+        """
+        Aggregates configuration from Global Settings, Valves, and User Input.
+        Runs Prompt Enhancement if enabled.
+        """
         if "features" in body:
             body["features"]["web_search"] = False
 
@@ -894,7 +1118,7 @@ class Filter:
             {k: v for k, v in self.valves.model_dump().items() if v is not None}
         )
 
-        # 1. Parse Input
+        # 1. Parse User Input
         self.parser.parse(user_prompt)
 
         if self.st.model.trigger == "img":
@@ -913,6 +1137,7 @@ class Filter:
 
         # 3. Prompt Enhancement (Creative Mode)
         E = self.config.Engines
+        # Determine if the backend supports negative prompts natively
         native_support = (self.st.model.engine == E.GEMINI) or (
             self.st.model.engine == E.FORGE and self.st.model.enable_hr
         )
@@ -924,8 +1149,10 @@ class Filter:
                 self.config.PROMPT_ENHANCE_RULES,
             ]
             user_content = f"EXPAND THIS PROMPT: {self.st.model.user_prompt}"
+
             if self.st.model.styles:
                 user_content += f"\nAPPLY THESE STYLES: {self.st.model.styles}"
+
             if self.st.model.negative_prompt and use_llm_neg:
                 user_content += f"\nAVOID THESE ELEMENTS AT ALL COSTS: {self.st.model.negative_prompt}"
                 instructions.append(
@@ -940,19 +1167,24 @@ class Filter:
                 creative_mode=True,
             )
             self.st.model.enhanced_prompt = (
-                re.sub(r"['\"]", "", enh) if enh else self.st.model.user_prompt
+                re.sub(r"[\"]", "", enh) if enh else self.st.model.user_prompt
             )
         else:
             self.st.model.enhanced_prompt = re.sub(
-                r"['\"]", "", self.st.model.user_prompt
+                r"[\"]", "", self.st.model.user_prompt
             )
 
         self._validate_and_normalize()
 
     async def _vision_audit(self):
+        """
+        Performs a Visual Quality Control audit.
+        Uses a Vision LLM to analyze the generated image against the prompt.
+        """
         if not self.st.model.quality_audit or not self.st.model.vision:
             return
-        await self.em.emit_status("Visual Quality Audit..", False)
+
+        # await self.em.emit_status("Visual Quality Audit..", False)
 
         url = (
             f"data:image/png;base64,{self.st.model.b64_data}"
@@ -964,6 +1196,7 @@ class Filter:
             if self.valves.strict_audit
             else self.config.AUDIT_STANDARD
         )
+
         raw_v = await self.inf._infer(
             task="Vision Audit",
             data={
@@ -976,6 +1209,7 @@ class Filter:
         )
 
         m = re.search(r"SCORE:\s*(\d+)", raw_v, re.IGNORECASE)
+
         if m:
             v = int(m.group(1))
             self.st.quality_audit_results.update(
@@ -997,8 +1231,15 @@ class Filter:
             self.st.quality_audit_results["critique"] = raw_v
 
     async def _output_delivery(self):
+        """
+        Constructs and emits the final UI components:
+        1. Prompt Citation
+        2. Audit/Warning Citation
+        3. Technical Details Citation
+        """
         total = int(time.time() - self.st.start_time)
         cit = self.st.model.enhanced_prompt.replace("*", "")
+
         if self.st.model.styles:
             cit += f"\n\nSTYLES\n{self.st.model.styles}"
         if self.st.model.negative_prompt:
@@ -1030,13 +1271,17 @@ class Filter:
             if self.st.cumulative_elapsed_time > 0
             else 0
         )
-        await self.em.emit_message("\n\n[1] [2] [3]")
+        total = int(time.time() - self.st.start_time)
+
         await self.em.emit_status(
             f"{total}s total | {self.st.image_gen_time_int}s img | {self.st.cumulative_tokens} tk | {tps:.1f} tk/s",
             True,
         )
 
     async def _output_status_only(self):
+        """
+        Emits only the performance stats for the 'imgx' (prompt-only) trigger.
+        """
         tps = (
             self.st.cumulative_tokens / self.st.cumulative_elapsed_time
             if self.st.cumulative_elapsed_time > 0
@@ -1048,24 +1293,36 @@ class Filter:
         )
 
     def _apply_global_settings(self):
+        """
+        Merges global environment variables from Open WebUI config into the state.
+        Mapping is handled by keys defined in EasymageConfig.
+        """
         conf = getattr(self.request.app.state.config, "_state", {})
         eng = str(self._unwrap(conf.get("IMAGE_GENERATION_ENGINE", "none"))).lower()
         sets = {"engine": eng}
+
         for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
             sets[self._clean_key(k, eng)] = self._unwrap(conf.get(k))
+
         for k in self.config.ENGINE_MAP.get(eng, []):
             val = self._unwrap(conf.get(k))
             if val is not None:
                 sets[self._clean_key(k, eng)] = val
+
         self.st.model.update(sets)
 
     def _validate_and_normalize(self):
+        """
+        Ensures model parameters (size, aspect ratio, models) are valid for the selected engine.
+        Enforces specific constraints for DALL-E 3 (valid aspect ratios).
+        """
         eng, mdl = (
             self.st.model.get("engine"),
             str(self.st.model.get("model", "")).lower(),
         )
         E = self.config.Engines
 
+        # Enforce defaults for specific engines
         if eng == E.OPENAI and "dall-e" not in mdl:
             self.st.model["model"] = "dall-e-3"
         elif eng == E.GEMINI and "imagen" not in mdl:
@@ -1074,6 +1331,7 @@ class Filter:
         sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
             "aspect_ratio"
         )
+
         try:
             w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
             r = (
@@ -1084,6 +1342,7 @@ class Filter:
         except:
             w, h, r = 1024, 1024, 1.0
 
+        # Adjust dimensions for DALL-E specific aspect ratios
         if eng == E.OPENAI or "dall-e" in mdl:
             if r > 1.2:
                 self.st.model["size"], self.st.model["aspect_ratio"] = (
@@ -1104,17 +1363,47 @@ class Filter:
             self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
 
     def _check_input(self, body: dict) -> Optional[Tuple[str, str]]:
+        """
+        Parses the last user message to detect Easymage triggers ('img' or 'imgx').
+        Handles both string and multimodal list content robustly.
+        """
         if body.get("is_probe"):
             return None
+
         msgs = body.get("messages", [])
         if not msgs:
             return None
-        last = msgs[-1]["content"]
-        txt = last[0].get("text", "") if isinstance(last, list) else last
-        m = re.match(r"^(img|imgx)\s", txt, re.IGNORECASE)
+
+        # Isolate the content of the last message
+        last = msgs[-1].get("content", "")
+
+        # Robust text extraction for multimodal compatibility
+        if isinstance(last, list):
+            # Find the first text block in the multimodal list, regardless of its position.
+            # This is crucial for inputs where an image precedes the text prompt.
+            txt = next(
+                (
+                    item.get("text", "")
+                    for item in last
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ),
+                "",
+            )
+        else:
+            # Handle standard string content
+            txt = last
+
+        # Now `txt` is guaranteed to be a string, safe for re.match
+        m = re.match(r"^(img|imgx)\s", str(txt), re.IGNORECASE)
+
         return (m.group(1).lower(), txt[m.end() :].strip()) if m else None
 
     async def _check_vision_capability(self):
+        """
+        Verifies if the current LLM supports Vision capabilities.
+        Uses a small black pixel test image to probe the model.
+        Results are cached to disk to improve performance.
+        """
         if self.st.model.debug or not self.st.valves.persistent_vision_cache:
             if os.path.exists(CAPABILITY_CACHE_PATH):
                 os.remove(CAPABILITY_CACHE_PATH)
@@ -1129,6 +1418,7 @@ class Filter:
             except:
                 pass
 
+        # 1x1 Black Pixel Base64
         b = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAS0lEQVQ4jWNkYGB4ycDAwMPAwMDEgAn+ERD7wQLVzIVFITGABZutJAEmBuxOJ8kAil0w8AZgiyr6umAYGDDEA5GFgYHhB5QmB/wAAIcLCBsQodqvAAAAAElFTkSuQmCC"
 
         res = await self.inf._infer(
@@ -1144,6 +1434,7 @@ class Filter:
         )
         has_v = "1" in res
         self.st.model.vision, self.st.vision_cache[self.st.model.id] = has_v, has_v
+
         try:
             os.makedirs(os.path.dirname(CAPABILITY_CACHE_PATH), exist_ok=True)
             with open(CAPABILITY_CACHE_PATH, "w") as f:
@@ -1152,6 +1443,9 @@ class Filter:
             pass
 
     def _unwrap(self, obj):
+        """
+        Recursively unwraps Open WebUI configuration objects (SimpleNamespace/PersistentConfig) to get raw values.
+        """
         if hasattr(obj, "value"):
             return self._unwrap(obj.value)
         if isinstance(obj, dict):
@@ -1159,6 +1453,10 @@ class Filter:
         return obj
 
     def _clean_key(self, key, eng):
+        """
+        Normalizes environment variable keys to match Easymage internal state keys.
+        Removes engine prefixes and standard prefixes.
+        """
         k = (
             key.upper()
             .replace("IMAGE_GENERATION_", "")
@@ -1171,41 +1469,3 @@ class Filter:
             .replace("IMAGES_", "")
             .lower()
         )
-
-    def _suppress_output(self, body: dict) -> dict:
-        """Modifies the request payload to halt default LLM text response generation."""
-
-        body["messages"] = [{"role": "assistant", "content": ""}]
-        body["max_tokens"], body["stop"] = 1, [chr(i) for i in range(128)]
-
-        return body
-
-    # def _suppress_output(self, body: dict) -> dict:
-    #     """Cache-friendly suppression: preserves prefix to reuse KV cache."""
-    #     # Segnaliamo all'outlet che deve pulire l'output residuo
-
-    #     # self.st.easymage_skip = True
-
-    #     # NON svuotiamo body["messages"]. Manteniamo il prefisso originale.
-    #     # Questo permette a Ollama di rispondere in <100ms usando la cache.
-    #     body["max_tokens"] = 1
-    #     body["stream"] = False
-
-    #     # Forza il backend a fermarsi immediatamente
-    #     if self.st.model.llm_type == "ollama":
-    #         body["options"] = {
-    #             "num_predict": 1,
-    #             "temperature": 0.0,
-    #             "num_ctx": 4096,  # Deve corrispondere a quello usato in precedenza
-    #         }
-
-    #     return body
-
-    # async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
-    #     """Cleans up the residual token generated by the suppressed backend call."""
-    #     if self.st.easymage_skip == True:
-    #         if "messages" in body and len(body["messages"]) > 0:
-    #             body["messages"][-1]["content"] = self.st.model.enha
-    #         return body
-
-    #     return body
