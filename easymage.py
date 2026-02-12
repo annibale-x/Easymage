@@ -1,11 +1,11 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.8.20
+version: 0.9.0-alpha.5
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
 author_email: annibale.x@gmail.com
-Description: Image generation filter and prompt enhancer for Open WebUI with deterministic control.
+Description: Image generation filter and prompt enhancer for Open WebUI with deterministic control, Easy Cloud Mode and Smart Engine Reconciliation.
 """
 
 # --- IMPORTS ---
@@ -26,9 +26,10 @@ CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
 
-# Create a global client for connection pooling if not exists
-# This further reduces latency on high-end systems by keeping sockets open.
-HTTP_CLIENT = httpx.AsyncClient(timeout=120)
+# Persistent HTTP client for connection pooling.
+# Placed at the top level to act as a singleton for the entire module lifetime.
+# This handles multiple origins (Ollama, OpenAI, Forge, Gemini) simultaneously.
+HTTP_CLIENT = httpx.AsyncClient()
 
 
 # --- CONFIGURATION & MAPS ---
@@ -46,7 +47,13 @@ class EasymageConfig:
         GEMINI = "gemini"
         COMFY = "comfyui"
 
-    # Maps short codes or alternative names to the specific sampler names required by backends (mostly A1111/Forge).
+    # Official Cloud Endpoints for Easy Cloud Mode
+    OFFICIAL_URLS = {
+        "openai": "https://api.openai.com/v1",
+        "gemini": "https://generativelanguage.googleapis.com/v1beta",
+    }
+
+    # Maps short codes or alternative names to the specific sampler names.
     SAMPLER_MAP = {
         "d3s": "DPM++ 3M SDE",
         "d2sh": "DPM++ 2M SDE Heun",
@@ -102,9 +109,43 @@ class EasymageConfig:
         Engines.GEMINI: ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
     }
 
+    # Expanded Model Shortcuts
+    MODEL_SHORTCUTS = {
+        # OpenAI
+        "d3": "dall-e-3",
+        "d2": "dall-e-2",
+        "g4o": "gpt-4o",
+        "g4om": "gpt-4o-mini",
+        # Gemini (Smart Chunk Initials)
+        "g3pip": "gemini-3-pro-image-preview",
+        "g2.5fi": "gemini-2.5-flash-image",
+        "g2f": "gemini-2.0-flash",
+        "g2fe": "gemini-2.0-flash-exp",
+        "i3": "imagen-3.0-generate-001",
+        "i3f": "imagen-3.0-fast-generate-001",
+        # Local / Forge
+        "flux": "flux1-dev.safetensors",
+        "sdxl": "sd_xl_base_1.0.safetensors",
+    }
+
+    # Auto-Detection Map: Associates specific models to their engines
+    # Used in Easy Cloud Mode to enforce "Model Trumps Engine" logic
+    # Keys MUST be lowercase for case-insensitive matching.
+    MODEL_ENGINE_MAP = {
+        "dall-e-3": Engines.OPENAI,
+        "dall-e-2": Engines.OPENAI,
+        "gemini-3-pro-image-preview": Engines.GEMINI,
+        "gemini-2.5-flash-image": Engines.GEMINI,
+        "gemini-2.0-flash": Engines.GEMINI,
+        "gemini-2.0-flash-exp": Engines.GEMINI,
+        "imagen-3.0-generate-001": Engines.GEMINI,
+        "imagen-3.0-fast-generate-001": Engines.GEMINI,
+        "flux1-dev.safetensors": Engines.FORGE,
+        "sd_xl_base_1.0.safetensors": Engines.FORGE,
+    }
+
     # PROMPT TEMPLATES
 
-    # Template for standard vision analysis without strict penalty rules.
     AUDIT_STANDARD = """
         RESET: ####################### NEW DATA STREAM ##########################
         ENVIRONMENT: STATELESS SANDBOX.
@@ -112,7 +153,6 @@ class EasymageConfig:
                 Compare image with: '{prompt}',
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
         
-        # Add explicit penalty rule for content contradictions
         RULE: If any element explicitly forbidden in the prompt is present, the AUDIT score MUST be below 50.
         
         TASK: TECHNICAL EVALUATION:
@@ -121,7 +161,6 @@ class EasymageConfig:
         MANDATORY: Final response MUST end with: SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
 
-    # Template for strict vision analysis, penalizing hallucinations and negative prompt violations severely.
     AUDIT_STRICT = """
         RESET: ####################### NEW DATA STREAM ##########################            
         ENVIRONMENT: STATELESS SANDBOX.
@@ -134,7 +173,6 @@ class EasymageConfig:
                 Identify any contradictions, missing elements, or hallucinations.
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
         
-        # Add ruthless penalty rule for negative prompt violations
         RULE: Contradictions regarding the presence or absence of objects are CRITICAL FAILURES. 
         RULE: If an element explicitly marked as absent/forbidden is detected, the AUDIT score MUST NOT exceed 30.
         
@@ -147,25 +185,21 @@ class EasymageConfig:
         SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
 
-    # Base prompt for the LLM to enhance the user's short description.
     PROMPT_ENHANCE_BASE = """
         ROLE: You are an expert AI Image Prompt Engineer.
         TASK: Expand the user's input into a professional, highly detailed prompt in {lang}.
         TASK: Add details about lighting, camera angle, textures, environment, and artistic style.
     """
 
-    # Injection for specific artistic styles requested by user.
     PROMPT_ENHANCE_STYLES = """
         MANDATORY: Incorporate these style elements naturally into the description: {styles}.
     """
 
-    # Injection for negative constraints.
     PROMPT_ENHANCE_NEG = """
         MANDATORY: The description must explicitly ensure that {negative} are NOT present. If necessary, 
         describe the scene in a way that confirms their absence.
     """
 
-    # Formatting rules to ensure the LLM output is clean for the image generator.
     PROMPT_ENHANCE_RULES = """
         RULE: Output ONLY the enhanced prompt.
         RULE: End the response immediately after the last descriptive sentence.
@@ -195,7 +229,6 @@ class Store(dict):
 class EasymageState:
     """
     Manages the internal state for a single request lifecycle.
-    Holds configuration, performance metrics, and generation results.
     """
 
     def __init__(self, valves):
@@ -209,6 +242,11 @@ class EasymageState:
                 "quality_audit": valves.quality_audit,
                 "persistent_vision_cache": valves.persistent_vision_cache,
                 "llm_type": "ollama",
+                "api_source": "Global",
+                "using_official_url": False,
+                # Intent Tracking Flags
+                "_explicit_engine": False,
+                "_explicit_model": False,
             }
         )
         self.valves = valves
@@ -241,17 +279,12 @@ class EasymageState:
 class EmitterService:
     """
     Handles asynchronous communication with the Open WebUI event emitter.
-    Used to send status updates, generated images, and citations to the chat UI.
     """
 
     def __init__(self, event_emitter):
         self.emitter = event_emitter
 
     async def emit_message(self, content: str):
-        """
-        Emits a standard text message or markdown content to the chat.
-        Handles formatting for code blocks.
-        """
         if self.emitter:
             fmt = (
                 content.replace("```", "```\n") if content.endswith("```") else content
@@ -263,18 +296,12 @@ class EmitterService:
             await self.emitter({"type": "message", "data": {"content": fmt}})
 
     async def emit_status(self, description: str, done: bool = False):
-        """
-        Updates the status indicator in the UI (e.g., "Generating Image...").
-        """
         if self.emitter:
             await self.emitter(
                 {"type": "status", "data": {"description": description, "done": done}}
             )
 
     async def emit_citation(self, name: str, document: str, source: str, cid: str):
-        """
-        Emits a citation block, used here to display metadata and audit results neatly.
-        """
         if self.emitter:
             await self.emitter(
                 {
@@ -291,17 +318,12 @@ class EmitterService:
 class DebugService:
     """
     Handles logging to stderr and strictly controlled object dumping.
-    Ensures Pydantic models and Starlette configuration objects are readable.
     """
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     def log(self, msg: str, is_error: bool = False):
-        """
-        Prints diagnostic logs to standard error for Docker/Console visibility.
-        Only logs if debug mode is enabled in valves, unless it is an error.
-        """
         if self.ctx.valves.debug or is_error:
             if is_error:
                 print(f"\n\n❌ EASYMAGE ERROR: {msg}\n", file=sys.stderr, flush=True)
@@ -309,18 +331,10 @@ class DebugService:
                 print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
 
     async def error(self, e: Any):
-        """
-        Logs exceptions and notifies the chat UI of critical filter errors.
-        """
         self.log(str(e), is_error=True)
         await self.ctx.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
 
     def dump(self, data: Any = None):
-        """
-        Indestructible Surgical Dumper.
-        Introspects objects to handle Open WebUI's 'PersistentConfig' and Pydantic models
-        without crashing on serialization.
-        """
         if not self.ctx.valves.debug:
             return
 
@@ -328,13 +342,10 @@ class DebugService:
         print(header, file=sys.stderr, flush=True)
 
         def universal_resolver(obj):
-            # Intercept Open WebUI PersistentConfig objects which hold data in .value
             if hasattr(obj, "value"):
                 return obj.value
-            # Intercept Pydantic models for serialization
             if hasattr(obj, "model_dump"):
                 return obj.model_dump()
-            # Fallback for unknown types
             return str(obj)
 
         try:
@@ -349,25 +360,19 @@ class DebugService:
 class InferenceEngine:
     """
     Abstracts LLM interactions for both Text and Vision tasks.
-    Supports switching between Ollama and OpenAI backends based on configuration.
     """
 
     def __init__(self, ctx):
-        self.ctx = ctx  # Access to Filter instance
+        self.ctx = ctx
 
     async def _infer(
         self, task: Optional[str], data: Dict[str, Any], creative_mode: bool = False
     ) -> str:
-        """
-        Main entry point for LLM inference.
-        Standardizes input data, manages timing/stats, and dispatches to specific backend.
-        """
         start = time.time()
 
         if task:
             await self.ctx.em.emit_status(f"{task}..")
 
-        # 1. Prepare a generic, abstract data structure for the prompt
         inference_data = {
             "system_prompt": None,
             "user_prompt": None,
@@ -380,20 +385,15 @@ class InferenceEngine:
         user_c = data.get("user")
 
         if isinstance(user_c, dict):
-            # Handle multimodal request (Text + Image)
             if i_url := user_c.get("image_url"):
-                # Extract base64 data from data URI
                 inference_data["image_b64"] = i_url.split(",")[-1]
 
             if t_c := user_c.get("text"):
                 inference_data["user_prompt"] = re.sub(r"\s+", " ", t_c).strip()
         else:
-            # Handle text-only request
             inference_data["user_prompt"] = re.sub(r"\s+", " ", str(user_c)).strip()
 
-        # 2. Configure Determinism parameters
         if creative_mode:
-            # Creative mode uses high temperature and respects user seed if present
             temperature = 0.7
             s_val = (
                 int(self.ctx.st.model.seed)
@@ -402,10 +402,8 @@ class InferenceEngine:
             )
             seed = None if s_val == -1 else s_val
         else:
-            # Analytical mode uses 0 temp and fixed seed
             seed, temperature = 42, 0.0
 
-        # 3. Dispatch to the specific engine builder based on model ownership
         backend_type = getattr(self.ctx.st.model, "llm_type", "ollama")
 
         try:
@@ -418,7 +416,6 @@ class InferenceEngine:
                     inference_data, seed, temperature
                 )
 
-            # Clean up thinking tokens (common in reasoning models)
             content = content.split("</think>")[-1].strip().strip('"').strip()
 
             if task:
@@ -435,15 +432,14 @@ class InferenceEngine:
     ) -> Tuple[str, int]:
         """
         Constructs and sends the payload to an Ollama-compatible API.
-        Enforces strict parameter isolation within the 'options' dict.
+        Minimalist version: relies entirely on server-side settings for session management.
         """
         base_urls = getattr(self.ctx.request.app.state.config, "OLLAMA_BASE_URLS", [])
+
         if not base_urls:
             raise Exception("Ollama Base URL is missing from Open WebUI configuration.")
 
         base_url = base_urls[0].rstrip("/")
-
-        # Build the Ollama-specific payload from the generic data structure
         messages = []
 
         if sys_prompt := inference_data.get("system_prompt"):
@@ -474,20 +470,15 @@ class InferenceEngine:
             "options": options,
         }
 
-        if self.ctx.st.model.debug:
-            self.ctx.debug.log(
-                f"OLLAMA: {base_url}/api/chat (s:{seed} t:{temperature})"
-            )
-            if inference_data.get("image_b64"):
-                self.ctx.debug.log(
-                    "Ollama vision payload detected, dumping built payload."
-                )
-                self.ctx.debug.dump(payload)
+        r = await HTTP_CLIENT.post(
+            f"{base_url}/api/chat",
+            json=payload,
+            timeout=self.ctx.valves.generation_timeout,
+        )
 
-        r = await HTTP_CLIENT.post(f"{base_url}/api/chat", json=payload)
-        # r = await client.post(f"{base_url}/api/chat", json=payload)
         r.raise_for_status()
         res = r.json()
+
         return (
             res.get("message", {}).get("content", ""),
             res.get("eval_count", 0),
@@ -498,9 +489,7 @@ class InferenceEngine:
     ) -> Tuple[str, int]:
         """
         Constructs and sends the payload to an OpenAI-compatible API.
-        Handles image formatting for GPT-4-Vision style endpoints.
         """
-
         conf = self.ctx.request.app.state.config
         base_urls = getattr(conf, "OPENAI_API_BASE_URLS", [])
 
@@ -511,7 +500,6 @@ class InferenceEngine:
         api_keys = getattr(conf, "OPENAI_API_KEYS", [])
         api_key = api_keys[0] if api_keys else ""
 
-        # Build the OpenAI-specific payload from the generic data structure
         messages = []
 
         if sys_prompt := inference_data.get("system_prompt"):
@@ -530,7 +518,6 @@ class InferenceEngine:
                 }
             )
 
-        # OpenAI expects content as a string for text-only, or a list for multimodal
         user_content = (
             content_parts if image_data else (inference_data.get("user_prompt") or "")
         )
@@ -547,18 +534,11 @@ class InferenceEngine:
         if seed is not None:
             payload["seed"] = seed
 
-        # Standard headers for OpenAI authentication
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
 
-        if self.ctx.st.model.debug:
-            self.ctx.debug.log(
-                f"OPENAI: {base_url}/chat/completions (s:{seed} t:{temperature})"
-            )
-
-        # Async request via global connection pool
         r = await HTTP_CLIENT.post(
             f"{base_url}/chat/completions",
             json=payload,
@@ -574,11 +554,9 @@ class InferenceEngine:
             res.get("usage", {}).get("completion_tokens", 0),
         )
 
-    async def purge_vram(self, unload_all: bool = False):
+    async def purge_vram(self, unload_current: bool = False):
         """
-        Cleans up the VRAM by unloading models from Ollama.
-        Always unloads all models except the one currently in use, 
-        unless 'unload_all' is True.
+        Interrogates Ollama for loaded models and purges them based on Open WebUI config.
         """
         if self.ctx.st.model.llm_type != "ollama":
             return
@@ -592,38 +570,33 @@ class InferenceEngine:
         base_url = base_urls[0].rstrip("/")
 
         try:
-            # 1. Fetch currently loaded models from the Ollama server
             r_ps = await HTTP_CLIENT.get(f"{base_url}/api/ps")
             r_ps.raise_for_status()
             loaded_models = r_ps.json().get("models", [])
-            
+
             current_model = self.ctx.st.model.id
 
-            # 2. Iterate and unload targeted models
             for m in loaded_models:
                 m_name = m.get("name")
 
-                # Optimization: skip current model unless extreme cleanup is requested
-                if not unload_all and m_name == current_model:
+                if not unload_current and m_name == current_model:
                     continue
 
-                # Sending keep_alive: 0 effectively evicts the model from VRAM
                 await HTTP_CLIENT.post(
                     f"{base_url}/api/chat",
                     json={"model": m_name, "keep_alive": 0},
-                    timeout=5
+                    timeout=5,
                 )
-                
-                self.ctx.debug.log(f"VRAM Purge: Evicted model {m_name}")
+
+                self.ctx.debug.log(f"VRAM Purge: Unloaded {m_name}")
 
         except Exception as e:
-            # Use the dedicated EM error service to notify the UI and log to stderr
             await self.ctx.debug.error(f"VRAM Purge failed: {str(e)}")
+
 
 class ImageGenEngine:
     """
-    Handles the actual image generation request dispatch.
-    Supports Automatic1111 (Forge), OpenAI DALL-E, Gemini, and Standard Open WebUI generation.
+    Handles the actual image generation request dispatch with Easy Cloud Mode logic.
     """
 
     def __init__(self, ctx):
@@ -632,7 +605,6 @@ class ImageGenEngine:
     async def generate(self) -> str:
         """
         Orchestrates the image generation process based on the selected engine.
-        Updates state with the generated image URL and B64 data.
         """
         await self.ctx.em.emit_status("Generating Image..")
         start = time.time()
@@ -640,7 +612,6 @@ class ImageGenEngine:
         E = self.ctx.config.Engines
 
         try:
-            # Dispatch to appropriate handler
             if eng == E.OPENAI:
                 await self._gen_openai()
             elif eng == E.GEMINI:
@@ -652,7 +623,6 @@ class ImageGenEngine:
 
             self.ctx.st.image_gen_time_int = int(time.time() - start)
 
-            # Notify the UI if successful
             if self.ctx.st.model.image_url:
                 await self.ctx.em.emit_message(
                     f"![Generated Image]({self.ctx.st.model.image_url})"
@@ -667,10 +637,6 @@ class ImageGenEngine:
     # --- PAYLOAD BUILDERS ---
 
     def _prepare_forge(self) -> dict:
-        """
-        Builds the payload for Automatic1111/Forge API.
-        Cleans the internal state dictionary to remove non-SD parameters.
-        """
         p = self.ctx.st.model.copy()
         p["prompt"] = p["enhanced_prompt"]
 
@@ -683,7 +649,6 @@ class ImageGenEngine:
         except:
             p["width"], p["height"] = 1024, 1024
 
-        # Remove internal Easymage keys that the backend doesn't understand
         for k in [
             "trigger",
             "id",
@@ -701,14 +666,16 @@ class ImageGenEngine:
             "size",
             "aspect_ratio",
             "llm_type",
+            "api_source",
+            "using_official_url",
+            "cli_api_key",
+            "_explicit_engine",
+            "_explicit_model",
         ]:
             p.pop(k, None)
         return p
 
     def _prepare_openai(self) -> dict:
-        """
-        Builds the payload for OpenAI DALL-E API.
-        """
         m = self.ctx.st.model
         return {
             "model": m.model or "dall-e-3",
@@ -721,49 +688,62 @@ class ImageGenEngine:
             "user": self.ctx.user.id,
         }
 
-    def _prepare_gemini(self) -> dict:
+    def _prepare_gemini(self, method: str) -> dict:
         """
-        Builds the payload for Google Gemini Image Generation.
-        Calculates aspect ratio strings from dimensions.
+        Builds the payload for Google Gemini Image Generation based on the detected method.
         """
         m = self.ctx.st.model
-        try:
-            w, h = map(int, (m.size or "1024x1024").split("x"))
-            rat = w / h
-            ar = (
-                "16:9"
-                if rat > 1.7
-                else (
-                    "4:3"
-                    if rat > 1.3
-                    else "9:16" if rat < 0.6 else "3:4" if rat < 0.8 else "1:1"
+
+        if method == "generateContent":
+            # Payload for standard Gemini API (Google AI Studio)
+            payload = {
+                "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
+                "generationConfig": {
+                    "candidateCount": 1,
+                    "negativePrompt": m.negative_prompt,
+                },
+            }
+
+            if m.seed and m.seed != -1:
+                payload["generationConfig"]["seed"] = m.seed
+
+            return payload
+
+        else:
+            # Payload for Vertex AI or compatible proxies using :predict
+            try:
+                w, h = map(int, (m.size or "1024x1024").split("x"))
+                rat = w / h
+                ar = (
+                    "16:9"
+                    if rat > 1.7
+                    else (
+                        "4:3"
+                        if rat > 1.3
+                        else "9:16" if rat < 0.6 else "3:4" if rat < 0.8 else "1:1"
+                    )
                 )
-            )
-        except:
-            ar = "1:1"
+            except:
+                ar = "1:1"
 
-        params = {
-            "sampleCount": m.get("n_iter", 1),
-            "negativePrompt": m.negative_prompt,
-            "aspectRatio": ar,
-            "safetySetting": "block_none",
-            "personGeneration": "allow_all",
-            "addWatermark": False,
-            "includeReasoning": False,
-            "outputOptions": {"mimeType": "image/png"},
-        }
+            params = {
+                "sampleCount": 1,
+                "negativePrompt": m.negative_prompt,
+                "aspectRatio": ar,
+                "safetySetting": "block_none",
+                "personGeneration": "allow_all",
+                "addWatermark": False,
+                "outputOptions": {"mimeType": "image/png"},
+            }
 
-        if m.seed and m.seed != -1:
-            params["seed"] = m.seed
+            if m.seed and m.seed != -1:
+                params["seed"] = m.seed
 
-        return {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
+            return {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
 
     # --- HTTP HANDLERS ---
 
     async def _gen_forge(self):
-        """
-        Executes request against Automatic1111/Forge txt2img endpoint.
-        """
         payload = self._prepare_forge()
         conf = self.ctx.request.app.state.config
         url = conf.AUTOMATIC1111_BASE_URL.rstrip("/")
@@ -792,21 +772,58 @@ class ImageGenEngine:
 
     async def _gen_openai(self):
         """
-        Executes request against OpenAI images/generations endpoint.
+        Executes request against OpenAI with Easy Cloud Mode support.
+        Hierarchy: CLI > Valve > Global.
         """
-        payload = self._prepare_openai()
         conf = self.ctx.request.app.state.config
+        valves = self.ctx.valves
+
+        # 1. Determine Base URL (Easy Mode vs Global)
+        if valves.easy_cloud_mode:
+            base_url = self.ctx.config.OFFICIAL_URLS["openai"]
+            self.ctx.st.model.using_official_url = True
+        else:
+            base_url = getattr(conf, "IMAGES_OPENAI_API_BASE_URL", "").rstrip("/")
+            if not base_url:
+                raise Exception(
+                    "OpenAI Base URL missing in Global Settings (and Easy Mode is OFF)."
+                )
+
+        # 2. Determine API Key (CLI > Valve > Global)
+        cli_key = self.ctx.st.model.get("cli_api_key")
+        global_keys = getattr(conf, "IMAGES_OPENAI_API_KEYS", [])
+        global_key = global_keys[0] if global_keys else ""
+        valve_key = valves.openai_api_key
+
+        api_key = cli_key or valve_key or global_key
+
+        # Track Source for Citations
+        if cli_key:
+            self.ctx.st.model.api_source = "CLI"
+        elif valve_key:
+            self.ctx.st.model.api_source = "Valve"
+        elif global_key:
+            self.ctx.st.model.api_source = "Global"
+        else:
+            self.ctx.st.model.api_source = "Missing"
+
+        if not api_key:
+            raise Exception("No OpenAI API Key found (Checked: CLI, Valves, Global).")
+
+        # 3. Prepare Payload & Execute
+        payload = self._prepare_openai()
         headers = {
-            "Authorization": f"Bearer {conf.IMAGES_OPENAI_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
         r = await HTTP_CLIENT.post(
-            f"{conf.IMAGES_OPENAI_API_BASE_URL}/images/generations",
+            f"{base_url}/images/generations",
             json=payload,
             headers=headers,
-            timeout=self.ctx.valves.generation_timeout,
+            timeout=valves.generation_timeout,
         )
+
         r.raise_for_status()
         img = r.json()["data"][0]["b64_json"]
         self.ctx.st.model.b64_data = img
@@ -814,26 +831,88 @@ class ImageGenEngine:
 
     async def _gen_gemini(self):
         """
-        Executes request against Google VertexAI/Gemini predict endpoint.
+        Executes request against Gemini with Easy Cloud Mode support.
+        Handles URL selection and smart method detection.
         """
-        payload = self._prepare_gemini()
         conf = self.ctx.request.app.state.config
-        url = f"{conf.IMAGES_GEMINI_API_BASE_URL}/models/{self.ctx.st.model.model}:predict"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": conf.IMAGES_GEMINI_API_KEY,
-        }
+        valves = self.ctx.valves
+
+        # 1. Determine Base URL
+        if valves.easy_cloud_mode:
+            base_url = self.ctx.config.OFFICIAL_URLS["gemini"]
+            self.ctx.st.model.using_official_url = True
+        else:
+            base_url = getattr(conf, "IMAGES_GEMINI_API_BASE_URL", "").rstrip("/")
+            if not base_url:
+                raise Exception(
+                    "Gemini Base URL missing in Global Settings (and Easy Mode is OFF)."
+                )
+
+        # 2. Determine API Key (CLI > Valve > Global)
+        cli_key = self.ctx.st.model.get("cli_api_key")
+        global_key = getattr(conf, "IMAGES_GEMINI_API_KEY", "")
+        valve_key = valves.gemini_api_key
+
+        api_key = cli_key or valve_key or global_key
+
+        # Track Source for Citations
+        if cli_key:
+            self.ctx.st.model.api_source = "CLI"
+        elif valve_key:
+            self.ctx.st.model.api_source = "Valve"
+        elif global_key:
+            self.ctx.st.model.api_source = "Global"
+        else:
+            self.ctx.st.model.api_source = "Missing"
+
+        if not api_key:
+            raise Exception("No Gemini API Key found (Checked: CLI, Valves, Global).")
+
+        # 3. Smart Method Detection (Easy Mode implies standard API)
+        is_studio = "generativelanguage.googleapis.com" in base_url
+        method = "generateContent" if is_studio else "predict"
+
+        model_name = self.ctx.st.model.model or "gemini-2.0-flash"
+        url = f"{base_url}/models/{model_name}:{method}"
+
+        # 4. Auth Headers
+        headers = {"Content-Type": "application/json"}
+
+        if is_studio:
+            headers["x-goog-api-key"] = api_key
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        payload = self._prepare_gemini(method)
+
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(
+                f"GEMINI: {url} | Method: {method} | EasyMode: {valves.easy_cloud_mode}"
+            )
 
         r = await HTTP_CLIENT.post(
             url,
             json=payload,
             headers=headers,
-            timeout=self.ctx.valves.generation_timeout,
+            timeout=valves.generation_timeout,
         )
+
         r.raise_for_status()
-        img = r.json()["predictions"][0]["bytesBase64Encoded"]
-        self.ctx.st.model.b64_data = img
-        self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
+        res = r.json()
+        img_b64 = ""
+
+        try:
+            if method == "generateContent":
+                img_b64 = res["candidates"][0]["content"]["parts"][0]["inlineData"][
+                    "data"
+                ]
+            else:
+                img_b64 = res["predictions"][0]["bytesBase64Encoded"]
+        except (KeyError, IndexError) as e:
+            raise Exception(f"Gemini API Error ({method}): {str(e)}")
+
+        self.ctx.st.model.b64_data = img_b64
+        self.ctx.st.model.image_url = f"data:image/png;base64,{img_b64}"
 
     async def _gen_standard(self):
         """
@@ -864,54 +943,50 @@ class PromptParser:
     def parse(self, user_prompt: str):
         """
         Analyzes the raw user string.
-        1. Splits negative prompt (after --no).
-        2. Separates parameter block from description.
-        3. Parses KV pairs (e.g., ar=16:9) and flags (e.g., +d).
+        Extracts parameters including the new 'api=' key and expands model shortcuts.
         """
-        m_st = self.ctx.st.model  # Direct state access
+        m_st = self.ctx.st.model
         clean, neg = user_prompt, ""
 
-        # Split Negative Prompt
         if " --no " in clean.lower():
             clean, neg = re.split(r" --no ", clean, maxsplit=1, flags=re.IGNORECASE)
 
-        # Split Parameters from Prompt Description
         if " -- " in clean:
             prefix, subj = clean.split(" -- ", 1)
         else:
-            # Detect parameter block end via regex looking for key=value or flags
             pat = r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)'
             matches = list(re.finditer(pat, clean))
             idx = matches[-1].end() if matches else 0
             prefix, subj = clean[:idx], clean[idx:].strip()
 
-        # Isolate the style string
         rem_styles = re.sub(
             r'(\b\w+=(?:"[^"]*"|\S+))|(?<!\w)([+-][dpah])(?!\w)', "", prefix
         ).strip()
         rem_styles = re.sub(r"^[\s,]+|[\s,]+$", "", rem_styles)
 
-        # Parse Key-Value Pairs
         kv_pat = r'(\b\w+)=("([^"]*)"|(\S+))'
 
         for k, _, q, u in re.findall(kv_pat, prefix):
-            k, v = k.lower(), (q if q else u).lower()
+            k, v = k.lower(), (q if q else u)  # Preserve case for API keys
             try:
-                # Map short keys to state model keys
                 if k == "ge":
                     m_st["engine"] = {
                         "a": self.config.Engines.FORGE,
                         "o": self.config.Engines.OPENAI,
                         "g": self.config.Engines.GEMINI,
                         "c": self.config.Engines.COMFY,
-                    }.get(v, v)
-                elif k == "mdl":
-                    m_st["model"] = {
-                        "d3": "dall-e-3",
-                        "d2": "dall-e-2",
-                        "i3": "imagen-3.0-generate-001",
-                        "i3f": "imagen-3.0-fast-generate-001",
-                    }.get(v, v)
+                    }.get(v.lower(), v.lower())
+
+                    m_st["_explicit_engine"] = True
+
+                elif k in ["mdl", "mod", "m"]:
+                    v_low = v.lower()
+                    m_st["model"] = self.config.MODEL_SHORTCUTS.get(v_low, v_low)
+
+                    m_st["_explicit_model"] = True
+
+                elif k == "api":
+                    m_st["cli_api_key"] = v
                 elif k == "stp":
                     m_st["steps"] = int(v)
                 elif k == "sz":
@@ -926,7 +1001,9 @@ class PromptParser:
                         "21": "21:9",
                     }.get(str(v), str(v))
                 elif k == "stl":
-                    m_st["style"] = {"v": "vivid", "n": "natural"}.get(v, v)
+                    m_st["style"] = {"v": "vivid", "n": "natural"}.get(
+                        v.lower(), v.lower()
+                    )
                 elif k == "sd":
                     m_st["seed"] = int(v)
                 elif k == "smp":
@@ -950,17 +1027,16 @@ class PromptParser:
             except ValueError:
                 continue
 
-        # Parse Boolean Flags (+d, -p, etc.)
         for flag in re.findall(r"(?<!\w)([+-][dpah])(?!\w)", prefix):
-            v, char = flag[0] == "+", flag[1]
+            v_bool, char = flag[0] == "+", flag[1]
             if char == "d":
-                m_st["debug"] = v
+                m_st["debug"] = v_bool
             elif char == "p":
-                m_st["enhanced_prompt"] = v
+                m_st["enhanced_prompt"] = v_bool
             elif char == "a":
-                m_st["quality_audit"] = v
+                m_st["quality_audit"] = v_bool
             elif char == "h":
-                m_st["enable_hr"] = v
+                m_st["enable_hr"] = v_bool
 
         m_st.update(
             {
@@ -998,32 +1074,138 @@ class Filter:
     class Valves(BaseModel):
         """
         User-configurable settings available in the Open WebUI interface.
+        Controls LLM behavior, VRAM management, and Image Generation parameters.
         """
 
-        enhanced_prompt: bool = Field(default=True)
-        quality_audit: bool = Field(default=True)
-        strict_audit: bool = Field(default=False)
-        persistent_vision_cache: bool = Field(default=False)
-        extreme_vram_cleanup: bool = Field(
-            default=False, 
-            description="If True, unloads the current LLM as well. If False (default), only unloads other idle models."
+        # --- CLOUD & CONNECTIVITY ---
+
+        easy_cloud_mode: bool = Field(
+            default=True,
+            description="If True, ignores global URLs for Cloud Models (OpenAI/Gemini) and uses official endpoints. Automatically detects Engine from Model.",
         )
-        generation_timeout: int = Field(default=120)
-        debug: bool = Field(default=False)
-        model: Optional[str] = Field(default=None)
-        steps: int = 20
-        size: str = "1024x1024"
-        aspect_ratio: str = "1:1"
-        seed: int = -1
-        cfg_scale: float = 1.0
-        distilled_cfg_scale: float = 3.5
-        sampler_name: str = "Euler"
-        scheduler: str = "Simple"
-        enable_hr: bool = False
-        hr_scale: float = 2.0
-        hr_upscaler: str = "Latent"
-        hr_distilled_cfg: float = 3.5
-        denoising_strength: float = 0.45
+
+        openai_api_key: str = Field(
+            default="",
+            description="Personal API Key for OpenAI. Overrides global settings. Can be overridden by 'api=' in CLI.",
+        )
+
+        gemini_api_key: str = Field(
+            default="",
+            description="Personal API Key for Google Gemini. Overrides global settings. Can be overridden by 'api=' in CLI.",
+        )
+
+        # --- CORE ENGINE SETTINGS ---
+
+        enhanced_prompt: bool = Field(
+            default=True,
+            description="Enable LLM-based prompt expansion to add artistic details, lighting, and textures.",
+        )
+
+        quality_audit: bool = Field(
+            default=True,
+            description="Perform a visual quality control (VQC) using a Vision LLM after the image is generated.",
+        )
+
+        strict_audit: bool = Field(
+            default=False,
+            description="Enable severe scoring penalties for hallucinations or negative prompt violations during audit.",
+        )
+
+        persistent_vision_cache: bool = Field(
+            default=False,
+            description="Save vision capability test results to a local JSON file to speed up startup.",
+        )
+
+        # --- HARDWARE & PERFORMANCE ---
+
+        extreme_vram_cleanup: bool = Field(
+            default=False,
+            description="If True, unloads the current LLM as well. If False (default), only unloads other idle models.",
+        )
+
+        generation_timeout: int = Field(
+            default=120,
+            description="Maximum time in seconds allowed for the image generation API request.",
+        )
+
+        debug: bool = Field(
+            default=False,
+            description="Enable verbose logging and surgical object dumping in the server console/logs.",
+        )
+
+        # --- IMAGE GENERATION PARAMETERS (FORGE/OPENAI/GEMINI) ---
+
+        model: Optional[str] = Field(
+            default=None,
+            description="The specific model checkpoint to use (e.g., flux1-dev, dall-e-3, imagen-3).",
+        )
+
+        steps: int = Field(
+            default=20,
+            description="Number of sampling steps. Higher values increase detail but take more time.",
+        )
+
+        size: str = Field(
+            default="1024x1024",
+            description="Default image resolution. Format: Width x Height.",
+        )
+
+        aspect_ratio: str = Field(
+            default="1:1",
+            description="Target aspect ratio. Automatically adjusts width and height if supported by the engine.",
+        )
+
+        seed: int = Field(
+            default=-1,
+            description="Deterministic seed for generation. Use -1 for a random seed.",
+        )
+
+        cfg_scale: float = Field(
+            default=1.0,
+            description="Classifier Free Guidance. Controls how strictly the model follows the prompt.",
+        )
+
+        distilled_cfg_scale: float = Field(
+            default=3.5,
+            description="CFG scale for distilled models (like Flux). Overrides standard CFG if set.",
+        )
+
+        sampler_name: str = Field(
+            default="Euler",
+            description="Sampling algorithm (mostly for Forge/Automatic1111).",
+        )
+
+        scheduler: str = Field(
+            default="Simple",
+            description="Noise scheduler for the sampling process (e.g., Karras, Beta, Simple).",
+        )
+
+        # --- HIGH-RES FIX / UPSCALING ---
+
+        enable_hr: bool = Field(
+            default=False,
+            description="Enable High-Resolution Fix pass (upscaling) during generation.",
+        )
+
+        hr_scale: float = Field(
+            default=2.0,
+            description="Multiplier for the final resolution during the High-Res Fix pass.",
+        )
+
+        hr_upscaler: str = Field(
+            default="Latent",
+            description="The algorithm used for upscaling (e.g., Latent, R-ESRGAN, ESRGAN_4x).",
+        )
+
+        hr_distilled_cfg: float = Field(
+            default=3.5,
+            description="Specific CFG scale applied during the upscaling pass.",
+        )
+
+        denoising_strength: float = Field(
+            default=0.45,
+            description="Controls how much the upscaler changes the original image. 0.0 is none, 1.0 is total.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -1041,7 +1223,6 @@ class Filter:
         """
         Intercepts the incoming request before it reaches the LLM.
         Decides if Easymage should trigger ('img' or 'imgx').
-        If triggered, silences the actual LLM and runs the generation logic internally.
         """
         trigger_data = self._check_input(body)
 
@@ -1058,14 +1239,14 @@ class Filter:
         self.st.model.trigger = trigger
         self.em = EmitterService(__event_emitter__)
 
-        # Metadata Discovery (Required for _suppress_output context)
         try:
             metadata = body.get("metadata", {})
             self.st.model.llm_type = metadata.get("model", {}).get("owned_by", "ollama")
+
         except:
             self.st.model.llm_type = "ollama"
 
-        # 2. IMMEDIATE SUPPRESSION (Neutralize the LLM while EM works)
+        # 2. IMMEDIATE SUPPRESSION
         body = self._suppress_output(body)
 
         # 3. WORKER INITIALIZATION
@@ -1078,37 +1259,65 @@ class Filter:
             # 4. LOGIC EXECUTION
             await self._setup_context(body, raw_p)
 
-            # Fork logic based on trigger type
+            # --- SMART ENGINE RECONCILIATION ---
+
+            m = self.st.model
+            detected_engine = self.config.MODEL_ENGINE_MAP.get(str(m.model).lower())
+
+            if self.st.model.debug:
+                self.debug.log(
+                    f"Reconciliation -> Explicit Engine: {m._explicit_engine}, Explicit Model: {m._explicit_model}, Current Engine: {m.engine}, Detected from Model: {detected_engine}"
+                )
+
+            if m._explicit_model and detected_engine:
+                # Case 1: User Explicitly chose a Model
+                m.engine = detected_engine
+
+            elif m._explicit_engine and not m._explicit_model:
+                # Case 2: User Explicitly chose an Engine but NOT a model
+                if detected_engine and detected_engine != m.engine:
+                    self.debug.log(
+                        f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting model."
+                    )
+                    m.model = None
+
+            elif self.valves.easy_cloud_mode and detected_engine:
+                # Case 3: Easy Cloud Mode
+                m.engine = detected_engine
+
             if self.st.model.trigger == "imgx":
-                # Prompt Engineering Mode only
                 self.st.output_content = self.st.model.enhanced_prompt
                 self.st.executed = True
-            else:
 
-                # Ensure the GPU is clear of 'ghost' models before calling Forge/Comfy
+            else:
+                # MANDATORY VRAM CLEANUP
                 await self.em.emit_status("Cleaning VRAM..")
-                await self.inf.purge_vram(unload_all=self.valves.extreme_vram_cleanup)
+
+                await self.inf.purge_vram(
+                    unload_current=self.valves.extreme_vram_cleanup
+                )
 
                 # Full Generation Mode
-                await self.img_gen.generate()
-                # Save the image reference to the buffer immediately
-                self.st.output_content = (
-                    f"![Generated Image]({self.st.model.image_url})"
-                )
+                # CRITICAL FIX: Capture the URL returned by generate()
+                img_url = await self.img_gen.generate()
+
+                # CRITICAL FIX: Explicitly construct the final content buffer.
+                # This ensures the Outlet saves both the Image Markdown AND the Citation placeholders
+                # to the chat history, fixing the "disappearing image on refresh" bug.
+                self.st.output_content = f"![Generated Image]({img_url})\n\n[1] [2] [3]"
 
                 if self.st.model.quality_audit:
                     await self._vision_audit()
 
-                # Add citation placeholders for outlet to fill
-                self.st.output_content += "\n\n[1] [2] [3]"
                 self.st.executed = True
 
         except Exception as e:
             await self.debug.error(e)
-            if self.st:
-                self.st.executed = True  # Allows the outlet to display the error
 
-        return body  # body has already been modified by _suppress_output
+            if self.st:
+                self.st.executed = True
+
+        return body
 
     async def outlet(
         self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
@@ -1116,7 +1325,6 @@ class Filter:
         """
         Intercepts the LLM's response (which is just empty space/silence).
         Replaces the silence with the actual content generated by Easymage.
-        Delivers citations/status updates.
         """
 
         if getattr(self, "st", None) is None or not self.st.executed:
@@ -1128,8 +1336,6 @@ class Filter:
         if __event_emitter__:
             self.em.emitter = __event_emitter__
 
-        # FINAL OVERWRITE
-        # Whatever the LLM generated (the invisible space), is now replaced by EM's definitive content.
         if "messages" in body and len(body["messages"]) > 0:
             body["messages"][-1]["content"] = self.st.output_content
 
@@ -1142,8 +1348,7 @@ class Filter:
 
     def _suppress_output(self, body: dict) -> dict:
         """
-        Force the LLM to be completely silent using invisible characters
-        and strict system instructions. Prevents double-response issues.
+        Force the LLM to be completely silent using invisible characters.
         """
         body["messages"] = [
             {
@@ -1157,18 +1362,22 @@ class Filter:
         body["stream"] = True
         body["stop"] = [chr(i) for i in range(128)]
 
-        # Specific handling for Ollama to minimize resource usage
         if self.st and self.st.model.llm_type == "ollama":
             if "options" not in body:
                 body["options"] = {}
-            body["options"].update({"num_predict": 1, "temperature": 0.0})
+
+            body["options"].update(
+                {
+                    "num_predict": 1,
+                    "temperature": 0.0,
+                }
+            )
 
         return body
 
     async def _setup_context(self, body: dict, user_prompt: str):
         """
         Aggregates configuration from Global Settings, Valves, and User Input.
-        Runs Prompt Enhancement if enabled.
         """
         if "features" in body:
             body["features"]["web_search"] = False
@@ -1196,9 +1405,8 @@ class Filter:
         )
         self.st.model.language = dl if dl else "English"
 
-        # 3. Prompt Enhancement (Creative Mode)
+        # 3. Prompt Enhancement
         E = self.config.Engines
-        # Determine if the backend supports negative prompts natively
         native_support = (self.st.model.engine == E.GEMINI) or (
             self.st.model.engine == E.FORGE and self.st.model.enable_hr
         )
@@ -1353,117 +1561,27 @@ class Filter:
             True,
         )
 
-    def _apply_global_settings(self):
-        """
-        Merges global environment variables from Open WebUI config into the state.
-        Mapping is handled by keys defined in EasymageConfig.
-        """
-        conf = getattr(self.request.app.state.config, "_state", {})
-        eng = str(self._unwrap(conf.get("IMAGE_GENERATION_ENGINE", "none"))).lower()
-        sets = {"engine": eng}
-
-        for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
-            sets[self._clean_key(k, eng)] = self._unwrap(conf.get(k))
-
-        for k in self.config.ENGINE_MAP.get(eng, []):
-            val = self._unwrap(conf.get(k))
-            if val is not None:
-                sets[self._clean_key(k, eng)] = val
-
-        self.st.model.update(sets)
-
-    def _validate_and_normalize(self):
-        """
-        Ensures model parameters (size, aspect ratio, models) are valid for the selected engine.
-        Enforces specific constraints for DALL-E 3 (valid aspect ratios).
-        """
-        eng, mdl = (
-            self.st.model.get("engine"),
-            str(self.st.model.get("model", "")).lower(),
-        )
-        E = self.config.Engines
-
-        # Enforce defaults for specific engines
-        if eng == E.OPENAI and "dall-e" not in mdl:
-            self.st.model["model"] = "dall-e-3"
-        elif eng == E.GEMINI and "imagen" not in mdl:
-            self.st.model["model"] = "imagen-3.0-fast-generate-001"
-
-        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
-            "aspect_ratio"
-        )
-
-        try:
-            w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
-            r = (
-                (int(ar.split(":")[0]) / int(ar.split(":")[1]))
-                if ar and ":" in str(ar)
-                else w / h
-            )
-        except:
-            w, h, r = 1024, 1024, 1.0
-
-        # Adjust dimensions for DALL-E specific aspect ratios
-        if eng == E.OPENAI or "dall-e" in mdl:
-            if r > 1.2:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1792x1024",
-                    "16:9",
-                )
-            elif r < 0.8:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1024x1792",
-                    "9:16",
-                )
-            else:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1024x1024",
-                    "1:1",
-                )
-        else:
-            self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
-
     def _check_input(self, body: dict) -> Optional[Tuple[str, str]]:
         """
         Parses the last user message to detect Easymage triggers ('img' or 'imgx').
-        Handles both string and multimodal list content robustly.
         """
         if body.get("is_probe"):
             return None
 
         msgs = body.get("messages", [])
+
         if not msgs:
             return None
 
-        # Isolate the content of the last message
-        last = msgs[-1].get("content", "")
-
-        # Robust text extraction for multimodal compatibility
-        if isinstance(last, list):
-            # Find the first text block in the multimodal list, regardless of its position.
-            # This is crucial for inputs where an image precedes the text prompt.
-            txt = next(
-                (
-                    item.get("text", "")
-                    for item in last
-                    if isinstance(item, dict) and item.get("type") == "text"
-                ),
-                "",
-            )
-        else:
-            # Handle standard string content
-            txt = last
-
-        # Now `txt` is guaranteed to be a string, safe for re.match
-        m = re.match(r"^(img|imgx)\s", str(txt), re.IGNORECASE)
+        last = msgs[-1]["content"]
+        txt = last[0].get("text", "") if isinstance(last, list) else last
+        m = re.match(r"^(img|imgx)\s", txt, re.IGNORECASE)
 
         return (m.group(1).lower(), txt[m.end() :].strip()) if m else None
 
     async def _check_vision_capability(self):
         """
         Verifies if the current LLM supports Vision capabilities.
-        Uses a small black pixel test image to probe the model.
-        Results are cached to disk to improve performance.
         """
         if self.st.model.debug or not self.st.valves.persistent_vision_cache:
             if os.path.exists(CAPABILITY_CACHE_PATH):
@@ -1505,7 +1623,7 @@ class Filter:
 
     def _unwrap(self, obj):
         """
-        Recursively unwraps Open WebUI configuration objects (SimpleNamespace/PersistentConfig) to get raw values.
+        Recursively unwraps Open WebUI configuration objects.
         """
         if hasattr(obj, "value"):
             return self._unwrap(obj.value)
@@ -1515,8 +1633,7 @@ class Filter:
 
     def _clean_key(self, key, eng):
         """
-        Normalizes environment variable keys to match Easymage internal state keys.
-        Removes engine prefixes and standard prefixes.
+        Normalizes environment variable keys.
         """
         k = (
             key.upper()
@@ -1530,3 +1647,70 @@ class Filter:
             .replace("IMAGES_", "")
             .lower()
         )
+
+    def _validate_and_normalize(self):
+        """
+        Ensures model parameters (size, aspect ratio, models) are valid for the selected engine.
+        """
+        eng, mdl = (
+            self.st.model.get("engine"),
+            str(self.st.model.get("model", "")).lower(),
+        )
+        E = self.config.Engines
+
+        # Enforce defaults for specific engines
+        if eng == E.OPENAI and "dall-e" not in mdl:
+            self.st.model["model"] = "dall-e-3"
+        elif eng == E.GEMINI and "imagen" not in mdl and "gemini" not in mdl:
+            self.st.model["model"] = "imagen-3.0-fast-generate-001"
+
+        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
+            "aspect_ratio"
+        )
+
+        try:
+            w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
+            r = (
+                (int(ar.split(":")[0]) / int(ar.split(":")[1]))
+                if ar and ":" in str(ar)
+                else w / h
+            )
+        except:
+            w, h, r = 1024, 1024, 1.0
+
+        if eng == E.OPENAI or "dall-e" in mdl:
+            if r > 1.2:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1792x1024",
+                    "16:9",
+                )
+            elif r < 0.8:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1024x1792",
+                    "9:16",
+                )
+            else:
+                self.st.model["size"], self.st.model["aspect_ratio"] = (
+                    "1024x1024",
+                    "1:1",
+                )
+        else:
+            self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
+
+    def _apply_global_settings(self):
+        """
+        Merges global environment variables from Open WebUI config into the state.
+        """
+        conf = getattr(self.request.app.state.config, "_state", {})
+        eng = str(self._unwrap(conf.get("IMAGE_GENERATION_ENGINE", "none"))).lower()
+        sets = {"engine": eng}
+
+        for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
+            sets[self._clean_key(k, eng)] = self._unwrap(conf.get(k))
+
+        for k in self.config.ENGINE_MAP.get(eng, []):
+            val = self._unwrap(conf.get(k))
+            if val is not None:
+                sets[self._clean_key(k, eng)] = val
+
+        self.st.model.update(sets)
