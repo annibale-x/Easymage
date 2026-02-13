@@ -1,12 +1,18 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-alpha.1
+version: 0.9.1-beta.1
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
 author_email: annibale.x@gmail.com
 Description: Advanced generation filter with Unified Auth, UserValves, Strict CLI Validation and extensive debugging.
 """
+
+# TODO: Quando chiavi arrivano da Valves (non UserValves) riportarle nel debug indicando che sono Global
+# TODO: Cambiare param ge in en (ge sembra gemini)
+# FIXME: LA distilled cfg scale non viene passata, o quanto meno non risulta nei details
+# TODO: Verificare per quale ragione i badge compaiono lentamente distanziati uno dall'altro
+
 
 # --- IMPORTS ---
 
