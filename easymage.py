@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.0-alpha.14
+version: 0.9.1-alpha.1
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -237,6 +237,7 @@ class EasymageState:
         self.model = Store(
             {
                 "trigger": None,
+                "subcommand": None,
                 "vision": False,
                 # Debug logic: start with UserValve, but allow CLI override later
                 "debug": user_valves.debug,
@@ -404,6 +405,63 @@ class DebugService:
         print("—" * 60, file=sys.stderr, flush=True)
 
 
+class NetworkService:
+    """
+    Centralized HTTP wrapper for handling requests, error logging, and payload dumping.
+    """
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    async def post(
+        self, url: str, payload: dict, headers: dict = None, timeout: int = 60
+    ) -> httpx.Response:
+        try:
+            r = await HTTP_CLIENT.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            return r
+
+        except httpx.HTTPStatusError as e:
+            # Dump diagnostics only if global debug is OFF (to avoid duplication)
+            if not self.ctx.st.model.debug:
+                print(
+                    f"\n❌ HTTP ERROR {e.response.status_code} | URL: {url}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    print(
+                        f"📦 PAYLOAD DUMP:\n{json.dumps(payload, indent=2)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except:
+                    print(
+                        f"📦 PAYLOAD DUMP: {str(payload)}", file=sys.stderr, flush=True
+                    )
+                print(
+                    f"📄 RESPONSE BODY: {e.response.text}\n",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+            raise e
+
+        except Exception as e:
+            if not self.ctx.st.model.debug:
+                print(
+                    f"\n❌ NETWORK ERROR: {str(e)} | URL: {url}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            raise e
+
+
 class InferenceEngine:
     """
     Abstracts LLM interactions for both Text and Vision tasks.
@@ -530,13 +588,12 @@ class InferenceEngine:
             "options": options,
         }
 
-        r = await HTTP_CLIENT.post(
+        r = await self.ctx.net.post(
             f"{base_url}/api/chat",
-            json=payload,
-            timeout=self.ctx.valves.generation_timeout,
+            payload=payload,
+            timeout=60,
         )
 
-        r.raise_for_status()
         res = r.json()
 
         return (
@@ -599,14 +656,13 @@ class InferenceEngine:
             "Authorization": f"Bearer {api_key}",
         }
 
-        r = await HTTP_CLIENT.post(
+        r = await self.ctx.net.post(
             f"{base_url}/chat/completions",
-            json=payload,
+            payload=payload,
             headers=headers,
-            timeout=self.ctx.valves.generation_timeout,
+            timeout=60,
         )
 
-        r.raise_for_status()
         res = r.json()
 
         return (
@@ -653,9 +709,9 @@ class InferenceEngine:
                 if not unload_current and m_name == current_model:
                     continue
 
-                await HTTP_CLIENT.post(
+                await self.ctx.net.post(
                     f"{base_url}/api/chat",
-                    json={"model": m_name, "keep_alive": 0},
+                    payload={"model": m_name, "keep_alive": 0},
                     timeout=5,
                 )
 
@@ -735,6 +791,7 @@ class ImageGenEngine:
 
         for k in [
             "trigger",
+            "subcommand",
             "id",
             "engine",
             "user_prompt",
@@ -784,21 +841,31 @@ class ImageGenEngine:
 
         if method == "generateContent":
             # Payload for standard Gemini API (Google AI Studio)
+            # FIXED: Implemented correct structure for Gemini 2.5 Flash Image
+            # using responseModalities and imageConfig.
+            
             payload = {
                 "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
                 "generationConfig": {
                     "candidateCount": 1,
-                    "negativePrompt": m.negative_prompt,
+                    "responseModalities": ["IMAGE"], # Explicitly request IMAGE mode
                 },
             }
 
+            # Inject Image Configuration if specific AR is requested
+            if m.aspect_ratio and m.aspect_ratio != "1:1":
+                payload["generationConfig"]["imageConfig"] = {
+                    "aspectRatio": m.aspect_ratio
+                }
+
             if m.seed and m.seed != -1:
+                # Seed is top-level in generationConfig for this endpoint
                 payload["generationConfig"]["seed"] = m.seed
 
             return payload
 
         else:
-            # Payload for Vertex AI or compatible proxies using :predict
+            # Payload for Vertex AI or compatible proxies using :predict (Imagen Legacy)
             try:
                 w, h = map(int, (m.size or "1024x1024").split("x"))
                 rat = w / h
@@ -829,6 +896,7 @@ class ImageGenEngine:
                 params["seed"] = m.seed
 
             return {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
+
 
     # --- HTTP HANDLERS ---
 
@@ -880,14 +948,13 @@ class ImageGenEngine:
         if self.ctx.st.model.debug:
             self.ctx.debug.log(f"[GEN] FORGE PAYLOAD: {json.dumps(payload, indent=2)}")
 
-        r = await HTTP_CLIENT.post(
+        r = await self.ctx.net.post(
             f"{url}/sdapi/v1/txt2img",
-            json=payload,
+            payload=payload,
             headers=headers,
             timeout=valves.generation_timeout,
         )
 
-        r.raise_for_status()
         res = r.json()
 
         img = res["images"][0].split(",")[-1]
@@ -952,14 +1019,13 @@ class ImageGenEngine:
         if self.ctx.st.model.debug:
             self.ctx.debug.log(f"[GEN] OPENAI PAYLOAD: {json.dumps(payload, indent=2)}")
 
-        r = await HTTP_CLIENT.post(
+        r = await self.ctx.net.post(
             f"{base_url}/images/generations",
-            json=payload,
+            payload=payload,
             headers=headers,
             timeout=valves.generation_timeout,
         )
 
-        r.raise_for_status()
         img = r.json()["data"][0]["b64_json"]
         self.ctx.st.model.b64_data = img
         self.ctx.st.model.image_url = f"data:image/png;base64,{img}"
@@ -1010,19 +1076,27 @@ class ImageGenEngine:
                 "No Gemini API Key found (Checked: CLI, User, Valves, Global)."
             )
 
-        # 3. Smart Method Detection (Easy Mode implies standard API)
-        is_studio = "generativelanguage.googleapis.com" in base_url
-        method = "generateContent" if is_studio else "predict"
-
+        # 3. Smart Method Detection
+        # Gemini 2.5 Flash Image and similar use generateContent.
+        # Legacy Imagen models use predict.
+        
         model_name = self.ctx.st.model.model or "gemini-2.0-flash"
+        
+        if "imagen" in model_name.lower():
+            method = "predict"
+        elif "generativelanguage.googleapis.com" in base_url:
+            method = "generateContent" 
+        else:
+            # Fallback for Vertex Enterprise endpoints
+            method = "predict"
+
         url = f"{base_url}/models/{model_name}:{method}"
 
         # 4. Auth Headers
         headers = {"Content-Type": "application/json"}
 
-        if is_studio:
+        if "generativelanguage.googleapis.com" in base_url:
             headers["x-goog-api-key"] = api_key
-
         else:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -1035,27 +1109,54 @@ class ImageGenEngine:
             )
             self.ctx.debug.log(f"[GEN] GEMINI PAYLOAD: {json.dumps(payload, indent=2)}")
 
-        r = await HTTP_CLIENT.post(
+        r = await self.ctx.net.post(
             url,
-            json=payload,
+            payload=payload,
             headers=headers,
             timeout=valves.generation_timeout,
         )
 
-        r.raise_for_status()
         res = r.json()
         img_b64 = ""
 
         try:
             if method == "generateContent":
-                img_b64 = res["candidates"][0]["content"]["parts"][0]["inlineData"][
-                    "data"
-                ]
+                # Check for candidates
+                candidates = res.get("candidates", [])
+                if not candidates:
+                     if "promptFeedback" in res:
+                         raise Exception(f"Request Blocked: {res['promptFeedback']}")
+                     raise Exception("No candidates returned from Gemini.")
+
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if not parts:
+                    raise Exception("Empty content parts in Gemini response.")
+
+                # Iterate ALL parts to find the image (inlineData).
+                for part in parts:
+                    if "inlineData" in part:
+                        img_b64 = part["inlineData"]["data"]
+                        break
+                
+                # If no image found after scanning all parts, raise error
+                if not img_b64:
+                    text_content = "No text content"
+                    for part in parts:
+                        if "text" in part:
+                            text_content = part["text"]
+                            break
+                    raise Exception(f"Model response did not contain an image. Output: {text_content}")
 
             else:
-                img_b64 = res["predictions"][0]["bytesBase64Encoded"]
+                # :predict endpoint (Imagen)
+                if "predictions" in res:
+                    img_b64 = res["predictions"][0]["bytesBase64Encoded"]
+                else:
+                    raise Exception(f"Imagen API Error: {json.dumps(res)}")
 
-        except (KeyError, IndexError) as e:
+        except Exception as e:
+            if self.ctx.st.model.debug:
+                 self.ctx.debug.log(f"[GEN] GEMINI RAW ERROR RESPONSE: {json.dumps(res, indent=2)}")
             raise Exception(f"Gemini API Error ({method}): {str(e)}")
 
         self.ctx.st.model.b64_data = img_b64
@@ -1579,28 +1680,36 @@ class Filter:
             self.st = None
             return body
 
-        trigger, raw_p = trigger_data
+        # UPDATED: Unpack subcommand
+        trigger, raw_p, subcommand = trigger_data
 
         # 1. IMMEDIATE STATE CREATION
         self.request = __request__
         self.user = UserModel(**__user__)
 
-        # POPULATION OF USERVALVES
+        # POPULATION OF USERVALVES (FIXED)
+        # Check if valves data is already an instance or a dictionary to prevent unpacking errors.
         if __user__ and "valves" in __user__:
             uv_data = __user__["valves"]
 
             if isinstance(uv_data, dict):
+                # If it's a raw dictionary, instantiate the model
                 self.user_valves = self.UserValves(**uv_data)
+
             else:
+                # If it's already an instance of UserValves (Pydantic model), assign directly
                 self.user_valves = uv_data
 
         self.st = EasymageState(self.valves, self.user_valves)
         self.st.model.trigger = trigger
+        self.st.model.subcommand = subcommand  # ADDED: Store subcommand in state
         self.em = EmitterService(__event_emitter__, self)
 
         if self.st.model.debug:
             self.debug = DebugService(self)
-            self.debug.log(f"[STEP 1/10] Inlet triggered. Trigger type: {trigger}")
+            self.debug.log(
+                f"[STEP 1/10] Inlet triggered. Trigger type: {trigger} | Sub: {subcommand}"
+            )
 
         try:
             metadata = body.get("metadata", {})
@@ -1614,20 +1723,23 @@ class Filter:
 
         # 3. WORKER INITIALIZATION
         self.debug = DebugService(self)
+        self.net = NetworkService(self)  # <--- NEW
         self.inf = InferenceEngine(self)
         self.img_gen = ImageGenEngine(self)
         self.parser = PromptParser(self)
 
         try:
-            # PHASE 1: Immediate Parsing
+
+            # PHASE 1: Immediate Parsing (Technical Extraction)
             if self.st.model.debug:
                 self.debug.log("[STEP 2/10] Parsing Input")
             self.parser.parse(raw_p)
 
-            # PHASE 2: Immediate Validation
+            # PHASE 2: Immediate Validation (Fail-Fast)
             self._validate_request()
 
             if self.st.validation_errors:
+                # Task 2: Blocking Errors - Abort generation
                 error_msg = "‼️ GENERATION BLOCKED:\n" + "\n".join(
                     [f"- {e}" for e in self.st.validation_errors]
                 )
@@ -1636,96 +1748,148 @@ class Filter:
 
                 await self.em.emit_status("Validation Failed", True)
                 await self.em.emit_message(error_msg)
+
+                if self.st.model.debug:
+                    self.debug.log("Generation aborted due to validation errors.")
                 return body
 
-            # PHASE 3: Context Setup
+            # PHASE 3: Heavy LLM Logic (Setup Context)
+            # Only proceeds if validation passed.
             if self.st.model.debug:
                 self.debug.log("[STEP 4/10] Setting Up Context")
             await self._setup_context(body, raw_p)
 
-            # --- EARLY DUMP EMISSION (Fixed Condition) ---
-            # FIX: Check self.st.model.debug (effective state) instead of self.user_valves.debug
+            # --- EARLY DUMP EMISSION (Fixed Condition & Sanitized) ---
             if self.st.model.debug:
                 self.debug.log("[STEP 4b/10] Emitting Early Debug Dumps")
-                
+
                 # Helper to mask sensitive keys locally
                 def _sanitize(data: dict):
                     safe = data.copy()
                     for k, v in safe.items():
                         # Mask if key contains 'auth', 'key' or is specifically 'cli_auth'
-                        if isinstance(v, str) and ("auth" in k.lower() or "key" in k.lower()):
+                        if isinstance(v, str) and (
+                            "auth" in k.lower() or "key" in k.lower()
+                        ):
                             safe[k] = self._mask_key(v)
                     return safe
 
                 # Create safe copies for display
                 safe_model = _sanitize(self.st.model)
                 safe_valves = _sanitize(self.user_valves.model_dump())
-                
+
                 # Prepare formatted JSON blocks
                 dump_model = json.dumps(safe_model, indent=2, default=str)
                 dump_valves = json.dumps(safe_valves, indent=2, default=str)
-                
-                debug_block = f"Debug STATE\n```json\n{dump_model}\n```\nDEBUG VALVES\n```json\n{dump_valves}\n```\n"
-                
+
+                debug_block = (
+                    f"\n\n<details>\n<summary>🔍 Debug STATE</summary>\n\n"
+                    f"```json\n{dump_model}\n```\n"
+                    f"</details>\n"
+                    f"<details>\n<summary>🔍 Debug VALVES</summary>\n\n"
+                    f"```json\n{dump_valves}\n```\n"
+                    f"</details>\n"
+                )
+
                 # Append to buffer AND Emit Immediately to stream
                 self.st.output_content += debug_block
                 await self.em.emit_message(debug_block)
 
-            # CONTINUE EXECUTION
-            if self.st.model.trigger == "imgx":
-                # For imgx, we prepend the prompt to the debug dumps
-                self.st.output_content = self.st.model.enhanced_prompt + self.st.output_content
+            # --- SMART ENGINE RECONCILIATION ---
+
+            m = self.st.model
+            detected_engine = self.config.MODEL_ENGINE_MAP.get(str(m.model).lower())
+
+            if self.st.model.debug:
+                self.debug.log(
+                    f"Reconciliation -> Explicit Engine: {m._explicit_engine}, Explicit Model: {m._explicit_model}, Current Engine: {m.engine}, Detected from Model: {detected_engine}"
+                )
+
+            if m._explicit_model and detected_engine:
+                m.engine = detected_engine
+
+            elif m._explicit_engine and not m._explicit_model:
+                if detected_engine and detected_engine != m.engine:
+                    self.debug.log(
+                        f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting model."
+                    )
+                    m.model = None
+
+            elif self.valves.easy_cloud_mode and detected_engine:
+                m.engine = detected_engine
+
+            # LOGIC SWITCH: Use subcommand "p" instead of old "imgx" trigger
+            if self.st.model.subcommand == "p":
+                self.st.output_content = (
+                    self.st.model.enhanced_prompt + self.st.output_content
+                )
                 self.st.executed = True
 
             else:
-                # MANDATORY VRAM CLEANUP
-                if self.st.model.debug:
-                    self.debug.log("[STEP 5/10] Cleaning VRAM")
-                await self.em.emit_status("Cleaning VRAM..")
 
-                await self.inf.purge_vram(
-                    unload_current=self.valves.extreme_vram_cleanup
-                )
+
+
+                # VRAM CLEANUP LOGIC
+                E = self.config.Engines
+                is_cloud_engine = self.st.model.engine in [E.OPENAI, E.GEMINI]
+
+                if not is_cloud_engine:
+                    if self.st.model.debug:
+                        self.debug.log("[STEP 5/10] Cleaning VRAM")
+                    await self.em.emit_status("Cleaning VRAM..")
+
+                    await self.inf.purge_vram(
+                        unload_current=self.valves.extreme_vram_cleanup
+                    )
+                elif self.st.model.debug:
+                    self.debug.log("[STEP 5/10] VRAM Purge Skipped (Cloud Engine)")
+
+
+
 
                 # Full Generation Mode
                 if self.st.model.debug:
                     self.debug.log("[STEP 6/10] Generating Image")
                 await self.img_gen.generate()
 
-                # Initialize content buffer (Image Markdown)
+                # Initialize content buffer (Image Markdown only)
                 img_md = (
                     f"![Generated Image]({self.st.model.image_url})"
                     if self.st.model.image_url
                     else ""
                 )
-                
-                # Prepend image to existing content (Image appears above Debug Dumps in final history)
-                self.st.output_content = img_md + self.st.output_content
+
+                # Prepend image to existing content
+                if self.st.output_content:
+                    self.st.output_content = self.st.output_content.strip() + "\n" + img_md
+                else:
+                    self.st.output_content = img_md
 
                 if self.st.model.quality_audit:
+                    # User sees only image + status bar here. No placeholders yet.
                     if self.st.model.debug:
                         self.debug.log("[STEP 7/10] Vision Audit")
                     await self._vision_audit()
 
-                # Emit placeholders to live stream
+                # Emit placeholders NOW to the live stream.
                 if self.st.model.debug:
                     self.debug.log("[STEP 8/10] Syncing Placeholders")
-                
+
                 await self.em.emit_message("\n\n[1] [2] [3]")
 
                 # Update the persistent buffer for DB save
                 self.st.output_content += "\n\n[1] [2] [3]"
 
                 self.st.executed = True
-                
+
                 if self.st.model.debug:
                     self.debug.log("[STEP 9/10] Inlet Finished")
 
         except Exception as e:
+            await self.em.emit_status("Execution Aborted!", True)
             await self.debug.error(e)
-
             if self.st:
-                self.st.executed = True
+                self.st.executed = False
 
         return body
 
@@ -1752,16 +1916,13 @@ class Filter:
             body["messages"][-1]["content"] = self.st.output_content
 
         # CRITICAL FIX: If validation failed, skip citations and show only status
-        if self.st.validation_errors:
+        # LOGIC SWITCH: Check subcommand "p" instead of "imgx"
+        if self.st.validation_errors or self.st.model.subcommand == "p":
             await self._output_status_only()
             return body
 
         # Standard delivery logic
-        if self.st.model.trigger == "imgx":
-            await self._output_status_only()
-
-        else:
-            await self._output_delivery()
+        await self._output_delivery()
 
         return body
 
@@ -1832,7 +1993,8 @@ class Filter:
             if v is not None:
                 self.st.model[k] = v
 
-        if self.st.model.trigger == "img":
+        # CHECK VISION: Only if trigger is img and NOT subcommand p (prompt enhancer doesn't need vision)
+        if self.st.model.trigger == "img" and self.st.model.subcommand != "p":
             await self._check_vision_capability()
 
         # 2. Language Detect (Deterministic)
@@ -1852,9 +2014,10 @@ class Filter:
         native_support = (self.st.model.engine == E.GEMINI) or (
             self.st.model.engine == E.FORGE and self.st.model.enable_hr
         )
-        use_llm_neg = (self.st.model.trigger == "imgx") or (not native_support)
+        # LOGIC SWITCH: Use subcommand "p" instead of "imgx"
+        use_llm_neg = (self.st.model.subcommand == "p") or (not native_support)
 
-        if self.st.model.enhanced_prompt or self.st.model.trigger == "imgx":
+        if self.st.model.enhanced_prompt or self.st.model.subcommand == "p":
             instructions = [
                 self.config.PROMPT_ENHANCE_BASE.format(lang=self.st.model.language),
                 self.config.PROMPT_ENHANCE_RULES,
@@ -1899,8 +2062,6 @@ class Filter:
         if not self.st.model.quality_audit or not self.st.model.vision:
             return
 
-        await self.em.emit_status("Visual Quality Audit..", False)
-
         url = (
             f"data:image/png;base64,{self.st.model.b64_data}"
             if self.st.model.b64_data
@@ -1915,7 +2076,7 @@ class Filter:
 
         # Trigger inference for vision analysis
         raw_v = await self.inf._infer(
-            task="Vision Audit",
+            task="Visual Quality Audit..",
             data={
                 "system": tpl.format(
                     prompt=self.st.model.enhanced_prompt, lang=self.st.model.language
@@ -1999,7 +2160,7 @@ class Filter:
             has_auth = bool(
                 getattr(self.request.app.state.config, "AUTOMATIC1111_API_AUTH", None)
             )
-            auth_info_line = f"• **Auth Status:** {'Credentials Active' if has_auth else 'None Required'}"
+            auth_info_line = f"→ Auth Status: {'Credentials Active' if has_auth else 'None Required'}"
 
         else:
             # For Cloud Engines, report where the API Key came from
@@ -2026,7 +2187,7 @@ class Filter:
                 src = "System Settings"
 
             used_key_display = _mask_key(cli_key or user_auth or valve_auth or "Global")
-            auth_info_line = f"• **API Source:** {src} ({used_key_display})"
+            auth_info_line = f"→ API Key Source: {src} ({used_key_display})"
 
         # Determine engine display name and cloud status
         engine_name = self.st.model.engine.upper()
@@ -2097,9 +2258,11 @@ class Filter:
             True,
         )
 
-    def _check_input(self, body: dict) -> Optional[Tuple[str, str]]:
+    def _check_input(self, body: dict) -> Optional[Tuple[str, str, Optional[str]]]:
         """
         Parses the last user message to detect Easymage triggers ('img' or 'imgx').
+        Updated for v0.9.0-alpha.15: Supports subcommand syntax (img:p, img:?, img:r)
+        Returns: (trigger, prompt, subcommand)
         """
 
         if body.get("is_probe"):
@@ -2112,9 +2275,17 @@ class Filter:
 
         last = msgs[-1]["content"]
         txt = last[0].get("text", "") if isinstance(last, list) else last
-        m = re.match(r"^(img|imgx)\s", txt, re.IGNORECASE)
 
-        return (m.group(1).lower(), txt[m.end() :].strip()) if m else None
+        # New Regex: Captures 'img' and optional subcommands :p, :?, :r
+        m = re.match(r"^(img)(?::(\?|p|r))?\s", txt, re.IGNORECASE)
+
+        if m:
+            trigger = m.group(1).lower()
+            # Capture subcommand (group 2) if present, else None
+            sub = m.group(2).lower() if m.group(2) else None
+            return (trigger, txt[m.end() :].strip(), sub)
+
+        return None
 
     async def _check_vision_capability(self):
         """
