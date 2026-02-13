@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.0-alpha.10
+version: 0.9.0-alpha.14
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -238,6 +238,7 @@ class EasymageState:
             {
                 "trigger": None,
                 "vision": False,
+                # Debug logic: start with UserValve, but allow CLI override later
                 "debug": user_valves.debug,
                 "enhanced_prompt": user_valves.enhanced_prompt,
                 "quality_audit": user_valves.quality_audit,
@@ -245,8 +246,9 @@ class EasymageState:
                 "llm_type": "ollama",
                 "api_source": "Global",
                 "using_official_url": False,
-                # Track keys for validation
+                # Track keys for validation and override protection
                 "captured_keys": [],
+                "overridden_keys": [],
                 # Intent Tracking Flags
                 "_explicit_engine": False,
                 "_explicit_model": False,
@@ -292,11 +294,15 @@ class EmitterService:
     Handles asynchronous communication with the Open WebUI event emitter.
     """
 
-    def __init__(self, event_emitter):
+    def __init__(self, event_emitter, ctx):
         self.emitter = event_emitter
+        self.ctx = ctx
 
     async def emit_message(self, content: str):
         if self.emitter:
+            if self.ctx.st.model.debug:
+                self.ctx.debug.log(f"[EMIT] Message: {content[:30]}...")
+
             fmt = (
                 content.replace("```", "```\n") if content.endswith("```") else content
             )
@@ -308,12 +314,18 @@ class EmitterService:
 
     async def emit_status(self, description: str, done: bool = False):
         if self.emitter:
+            if self.ctx.st.model.debug:
+                self.ctx.debug.log(f"[EMIT] Status: {description} (Done: {done})")
+
             await self.emitter(
                 {"type": "status", "data": {"description": description, "done": done}}
             )
 
     async def emit_citation(self, name: str, document: str, source: str, cid: str):
         if self.emitter:
+            if self.ctx.st.model.debug:
+                self.ctx.debug.log(f"[EMIT] Citation {cid}: {name}")
+
             await self.emitter(
                 {
                     "type": "citation",
@@ -341,17 +353,28 @@ class DebugService:
         )
 
         if st_debug or is_error:
+            # Calculate time delta from start
+            delta = 0.0
+            if self.ctx.st and self.ctx.st.start_time:
+                delta = time.time() - self.ctx.st.start_time
+
+            prefix = f"[{delta:+.2f}s]"
+
             if is_error:
-                print(f"\n\n❌ EASYMAGE ERROR: {msg}\n", file=sys.stderr, flush=True)
+                print(
+                    f"\n\n❌ {prefix} EASYMAGE ERROR: {msg}\n",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             else:
-                print(f"⚡ EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
+                print(f"⚡ {prefix} EASYMAGE DEBUG: {msg}", file=sys.stderr, flush=True)
 
     async def error(self, e: Any):
         self.log(str(e), is_error=True)
         await self.ctx.em.emit_message(f"\n\n❌ EASYMAGE ERROR: {str(e)}\n")
 
-    def dump(self, data: Any = None):
+    def dump(self, data: Any = None, label: str = "DUMP"):
         st_debug = (
             self.ctx.st.model.debug if self.ctx.st else self.ctx.user_valves.debug
         )
@@ -359,7 +382,7 @@ class DebugService:
         if not st_debug:
             return
 
-        header = "—" * 60 + "\n📦 EASYMAGE DUMP:\n" + "—" * 60
+        header = "—" * 60 + f"\n📦 EASYMAGE {label}:\n" + "—" * 60
         print(header, file=sys.stderr, flush=True)
 
         def universal_resolver(obj):
@@ -395,7 +418,7 @@ class InferenceEngine:
         start = time.time()
 
         if self.ctx.st.model.debug:
-            self.ctx.debug.log(f"Inference started: {task}")
+            self.ctx.debug.log(f"[INFER] Starting Task: {task}")
 
         if task:
             await self.ctx.em.emit_status(f"{task}..")
@@ -437,7 +460,9 @@ class InferenceEngine:
 
         try:
             if self.ctx.st.model.debug:
-                self.ctx.debug.log(f"Dispatching inference to backend: {backend_type}")
+                self.ctx.debug.log(
+                    f"[INFER] Dispatching to Backend: {backend_type} (Seed: {seed})"
+                )
 
             if backend_type == "ollama":
                 content, usage = await self._infer_ollama(
@@ -455,7 +480,7 @@ class InferenceEngine:
                 self.ctx.st.register_stat(task, time.time() - start, usage)
 
             if self.ctx.st.model.debug:
-                self.ctx.debug.log(f"Inference completed for {task}. Usage: {usage}")
+                self.ctx.debug.log(f"[INFER] Completed: {task}. Usage: {usage}")
 
             return content
 
@@ -593,6 +618,11 @@ class InferenceEngine:
         """
         Interrogates Ollama for loaded models and purges them based on Open WebUI config.
         """
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(
+                f"[VRAM] Checking purge necessity (Unload Current: {unload_current})"
+            )
+
         if self.ctx.st.model.llm_type != "ollama":
             if self.ctx.st.model.debug:
                 self.ctx.debug.log("VRAM Purge skipped (not Ollama backend)")
@@ -632,11 +662,11 @@ class InferenceEngine:
                 unloaded_list.append(m_name)
 
             if unloaded_list:
-                self.ctx.debug.log(f"VRAM Purge: Unloaded models: {unloaded_list}")
+                self.ctx.debug.log(f"[VRAM] Purge: Unloaded models: {unloaded_list}")
 
             else:
                 if self.ctx.st.model.debug:
-                    self.ctx.debug.log("VRAM Purge: No models to unload.")
+                    self.ctx.debug.log("[VRAM] Purge: No models to unload.")
 
         except Exception as e:
             await self.ctx.debug.error(f"VRAM Purge failed: {str(e)}")
@@ -661,7 +691,7 @@ class ImageGenEngine:
         E = self.ctx.config.Engines
 
         if self.ctx.st.model.debug:
-            self.ctx.debug.log(f"Starting image generation using engine: {eng}")
+            self.ctx.debug.log(f"[GEN] Starting image generation using engine: {eng}")
 
         try:
             if eng == E.OPENAI:
@@ -726,6 +756,7 @@ class ImageGenEngine:
             "_explicit_engine",
             "_explicit_model",
             "captured_keys",
+            "overridden_keys",
         ]:
             p.pop(k, None)
 
@@ -847,7 +878,7 @@ class ImageGenEngine:
         payload = self._prepare_forge()
 
         if self.ctx.st.model.debug:
-            self.ctx.debug.log(f"FORGE PAYLOAD: {json.dumps(payload, indent=2)}")
+            self.ctx.debug.log(f"[GEN] FORGE PAYLOAD: {json.dumps(payload, indent=2)}")
 
         r = await HTTP_CLIENT.post(
             f"{url}/sdapi/v1/txt2img",
@@ -919,7 +950,7 @@ class ImageGenEngine:
 
         # Task 4: Debug Log - Payload
         if self.ctx.st.model.debug:
-            self.ctx.debug.log(f"OPENAI PAYLOAD: {json.dumps(payload, indent=2)}")
+            self.ctx.debug.log(f"[GEN] OPENAI PAYLOAD: {json.dumps(payload, indent=2)}")
 
         r = await HTTP_CLIENT.post(
             f"{base_url}/images/generations",
@@ -1002,7 +1033,7 @@ class ImageGenEngine:
             self.ctx.debug.log(
                 f"GEMINI: {url} | Method: {method} | EasyMode: {valves.easy_cloud_mode}"
             )
-            self.ctx.debug.log(f"GEMINI PAYLOAD: {json.dumps(payload, indent=2)}")
+            self.ctx.debug.log(f"[GEN] GEMINI PAYLOAD: {json.dumps(payload, indent=2)}")
 
         r = await HTTP_CLIENT.post(
             url,
@@ -1034,6 +1065,9 @@ class ImageGenEngine:
         """
         Falls back to the standard Open WebUI image generation router.
         """
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log("[GEN] Using Standard OpenWebUI Router")
+
         form = CreateImageForm(
             prompt=self.ctx.st.model.enhanced_prompt,
             n=1,
@@ -1056,17 +1090,30 @@ class PromptParser:
     def __init__(self, ctx):
         self.ctx = ctx
         self.config = ctx.config
+        # Map CLI short keys to Model attributes for Override Protection
+        self.cli_map = {
+            "sz": "size",
+            "stp": "steps",
+            "ge": "engine",
+            "mdl": "model",
+            "sd": "seed",
+            "sch": "scheduler",
+            "smp": "sampler_name",
+            "ar": "aspect_ratio",
+            "cs": "cfg_scale",
+            "dns": "denoising_strength",
+        }
 
     def parse(self, user_prompt: str):
         """
         Analyzes the raw user string.
         Extracts parameters including the new 'auth=' key and expands model shortcuts.
         """
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(f"[PARSER] Input: {user_prompt[:50]}...")
+
         m_st = self.ctx.st.model
         clean, neg = user_prompt, ""
-
-        if self.ctx.st.model.debug:
-            self.ctx.debug.log(f"Parsing prompt: {user_prompt}")
 
         if " --no " in clean.lower():
             clean, neg = re.split(r" --no ", clean, maxsplit=1, flags=re.IGNORECASE)
@@ -1095,8 +1142,12 @@ class PromptParser:
             if k not in m_st["captured_keys"]:
                 m_st["captured_keys"].append(k)
 
+            # CRITICAL FIX: Track keys for CLI Override Protection
+            if k in self.cli_map:
+                m_st["overridden_keys"].append(self.cli_map[k])
+
             if self.ctx.st.model.debug:
-                self.ctx.debug.log(f"Parser found key: {k} = {v}")
+                self.ctx.debug.log(f"[PARSER] Found key: {k} = {v}")
 
             try:
                 if k == "ge":
@@ -1108,6 +1159,9 @@ class PromptParser:
                     }.get(v.lower(), v.lower())
 
                     m_st["_explicit_engine"] = True
+                    # Also mark explicit flags as overridden
+                    if "engine" not in m_st["overridden_keys"]:
+                        m_st["overridden_keys"].append("engine")
 
                 elif k in ["mdl", "mod", "m"]:
                     v_low = v.lower()
@@ -1177,12 +1231,15 @@ class PromptParser:
 
             if char == "d":
                 m_st["debug"] = v_bool
+                m_st["overridden_keys"].append("debug")
 
             elif char == "p":
                 m_st["enhanced_prompt"] = v_bool
+                m_st["overridden_keys"].append("enhanced_prompt")
 
             elif char == "a":
                 m_st["quality_audit"] = v_bool
+                m_st["overridden_keys"].append("quality_audit")
 
             elif char == "h":
                 m_st["enable_hr"] = v_bool
@@ -1194,6 +1251,9 @@ class PromptParser:
                 "styles": rem_styles,
             }
         )
+
+        if self.ctx.st.model.debug:
+            self.ctx.debug.log(f"[PARSER] Overridden Keys: {m_st['overridden_keys']}")
 
     def _norm(self, name, mapping):
         """
@@ -1385,12 +1445,44 @@ class Filter:
         # Explicit type hinting for Pyright: st can be EasymageState or None
         self.st: EasymageState = None  # type: ignore
 
+    def _unwrap(self, obj):
+        """
+        Recursively unwraps Open WebUI configuration objects.
+        """
+
+        if hasattr(obj, "value"):
+            return self._unwrap(obj.value)
+
+        if isinstance(obj, dict):
+            return {k: self._unwrap(v) for k, v in obj.items()}
+
+        return obj
+
+    def _clean_key(self, key, eng):
+        """
+        Normalizes environment variable keys.
+        """
+
+        k = (
+            key.upper()
+            .replace("IMAGE_GENERATION_", "")
+            .replace("IMAGE_", "")
+            .replace("ENABLE_IMAGE_", "ENABLE_")
+        )
+
+        return (
+            k.replace(f"{eng.upper()}_API_", "")
+            .replace(f"{eng.upper()}_", "")
+            .replace("IMAGES_", "")
+            .lower()
+        )
+
     def _validate_request(self):
         """
         Task 2: Validates the request consistency and engine compatibility.
         """
         if self.st.model.debug:
-            self.debug.log("Starting Request Validation...")
+            self.debug.log("[STEP 3/10] Validating Request...")
 
         m = self.st.model
         conf = self.config
@@ -1493,26 +1585,22 @@ class Filter:
         self.request = __request__
         self.user = UserModel(**__user__)
 
-        # POPULATION OF USERVALVES (FIXED)
-        # Check if valves data is already an instance or a dictionary to prevent unpacking errors.
+        # POPULATION OF USERVALVES
         if __user__ and "valves" in __user__:
             uv_data = __user__["valves"]
 
             if isinstance(uv_data, dict):
-                # If it's a raw dictionary, instantiate the model
                 self.user_valves = self.UserValves(**uv_data)
-
             else:
-                # If it's already an instance of UserValves (Pydantic model), assign directly
                 self.user_valves = uv_data
 
         self.st = EasymageState(self.valves, self.user_valves)
         self.st.model.trigger = trigger
-        self.em = EmitterService(__event_emitter__)
+        self.em = EmitterService(__event_emitter__, self)
 
         if self.st.model.debug:
             self.debug = DebugService(self)
-            self.debug.log(f"Inlet triggered. Trigger type: {trigger}")
+            self.debug.log(f"[STEP 1/10] Inlet triggered. Trigger type: {trigger}")
 
         try:
             metadata = body.get("metadata", {})
@@ -1531,15 +1619,15 @@ class Filter:
         self.parser = PromptParser(self)
 
         try:
-
-            # PHASE 1: Immediate Parsing (Technical Extraction)
+            # PHASE 1: Immediate Parsing
+            if self.st.model.debug:
+                self.debug.log("[STEP 2/10] Parsing Input")
             self.parser.parse(raw_p)
 
-            # PHASE 2: Immediate Validation (Fail-Fast)
+            # PHASE 2: Immediate Validation
             self._validate_request()
 
             if self.st.validation_errors:
-                # Task 2: Blocking Errors - Abort generation
                 error_msg = "‼️ GENERATION BLOCKED:\n" + "\n".join(
                     [f"- {e}" for e in self.st.validation_errors]
                 )
@@ -1548,49 +1636,51 @@ class Filter:
 
                 await self.em.emit_status("Validation Failed", True)
                 await self.em.emit_message(error_msg)
-
-                if self.st.model.debug:
-                    self.debug.log("Generation aborted due to validation errors.")
                 return body
 
-            # PHASE 3: Heavy LLM Logic (Setup Context)
-            # Only proceeds if validation passed.
+            # PHASE 3: Context Setup
+            if self.st.model.debug:
+                self.debug.log("[STEP 4/10] Setting Up Context")
             await self._setup_context(body, raw_p)
 
-            # --- SMART ENGINE RECONCILIATION ---
-
-            m = self.st.model
-            detected_engine = self.config.MODEL_ENGINE_MAP.get(str(m.model).lower())
-
+            # --- EARLY DUMP EMISSION (Fixed Condition) ---
+            # FIX: Check self.st.model.debug (effective state) instead of self.user_valves.debug
             if self.st.model.debug:
-                self.debug.log(
-                    f"Reconciliation -> Explicit Engine: {m._explicit_engine}, Explicit Model: {m._explicit_model}, Current Engine: {m.engine}, Detected from Model: {detected_engine}"
-                )
+                self.debug.log("[STEP 4b/10] Emitting Early Debug Dumps")
+                
+                # Helper to mask sensitive keys locally
+                def _sanitize(data: dict):
+                    safe = data.copy()
+                    for k, v in safe.items():
+                        # Mask if key contains 'auth', 'key' or is specifically 'cli_auth'
+                        if isinstance(v, str) and ("auth" in k.lower() or "key" in k.lower()):
+                            safe[k] = self._mask_key(v)
+                    return safe
 
-            if m._explicit_model and detected_engine:
-                m.engine = detected_engine
+                # Create safe copies for display
+                safe_model = _sanitize(self.st.model)
+                safe_valves = _sanitize(self.user_valves.model_dump())
+                
+                # Prepare formatted JSON blocks
+                dump_model = json.dumps(safe_model, indent=2, default=str)
+                dump_valves = json.dumps(safe_valves, indent=2, default=str)
+                
+                debug_block = f"Debug STATE\n```json\n{dump_model}\n```\nDEBUG VALVES\n```json\n{dump_valves}\n```\n"
+                
+                # Append to buffer AND Emit Immediately to stream
+                self.st.output_content += debug_block
+                await self.em.emit_message(debug_block)
 
-            elif m._explicit_engine and not m._explicit_model:
-                if detected_engine and detected_engine != m.engine:
-                    self.debug.log(
-                        f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting model."
-                    )
-                    m.model = None
-
-            elif self.valves.easy_cloud_mode and detected_engine:
-                m.engine = detected_engine
-
-            # Task 4: In-Chat Dumps
-            if self.user_valves.debug:
-                self.st.output_content += f"```json\n{json.dumps(self.st.model, indent=2, default=str)}\n```\n"
-                self.st.output_content += f"```json\n{json.dumps(self.valves.model_dump(), indent=2, default=str)}\n```\n"
-
+            # CONTINUE EXECUTION
             if self.st.model.trigger == "imgx":
-                self.st.output_content += self.st.model.enhanced_prompt
+                # For imgx, we prepend the prompt to the debug dumps
+                self.st.output_content = self.st.model.enhanced_prompt + self.st.output_content
                 self.st.executed = True
 
             else:
                 # MANDATORY VRAM CLEANUP
+                if self.st.model.debug:
+                    self.debug.log("[STEP 5/10] Cleaning VRAM")
                 await self.em.emit_status("Cleaning VRAM..")
 
                 await self.inf.purge_vram(
@@ -1598,25 +1688,38 @@ class Filter:
                 )
 
                 # Full Generation Mode
+                if self.st.model.debug:
+                    self.debug.log("[STEP 6/10] Generating Image")
                 await self.img_gen.generate()
 
-                # BUGFIX (0.9.0-alpha.10):
-                # 1. Emit placeholders to Live Stream so citations [1][2][3] appear immediately.
-                await self.em.emit_message("\n\n[1] [2] [3]")
-
-                # 2. Include Image Markdown in Final Content so it survives Page Refresh (DB Persistence).
-                # Previous logic excluded it to prevent flicker, but caused data loss.
+                # Initialize content buffer (Image Markdown)
                 img_md = (
                     f"![Generated Image]({self.st.model.image_url})"
                     if self.st.model.image_url
                     else ""
                 )
-                self.st.output_content = f"{img_md}\n\n[1] [2] [3]"
+                
+                # Prepend image to existing content (Image appears above Debug Dumps in final history)
+                self.st.output_content = img_md + self.st.output_content
 
                 if self.st.model.quality_audit:
+                    if self.st.model.debug:
+                        self.debug.log("[STEP 7/10] Vision Audit")
                     await self._vision_audit()
 
+                # Emit placeholders to live stream
+                if self.st.model.debug:
+                    self.debug.log("[STEP 8/10] Syncing Placeholders")
+                
+                await self.em.emit_message("\n\n[1] [2] [3]")
+
+                # Update the persistent buffer for DB save
+                self.st.output_content += "\n\n[1] [2] [3]"
+
                 self.st.executed = True
+                
+                if self.st.model.debug:
+                    self.debug.log("[STEP 9/10] Inlet Finished")
 
         except Exception as e:
             await self.debug.error(e)
@@ -1632,6 +1735,8 @@ class Filter:
         """
         Intercepts the LLM's response.
         """
+        if getattr(self, "st", None) is not None and self.st.model.debug:
+            self.debug.log(f"[STEP 10/10] Outlet Triggered")
 
         if getattr(self, "st", None) is None or not self.st.executed:
             return body
@@ -1663,6 +1768,7 @@ class Filter:
     def _suppress_output(self, body: dict) -> dict:
         """
         Force the LLM to be completely silent using invisible characters.
+        REVERTED to robust implementation with stop tokens.
         """
 
         body["messages"] = [
@@ -1696,23 +1802,35 @@ class Filter:
         """
 
         if self.st.model.debug:
-            self.debug.log("Setting up context...")
+            self.debug.log("Context: Merging Configurations...")
 
         if "features" in body:
             body["features"]["web_search"] = False
 
         self.st.model.id = body.get("model", "")
+
+        # 1. Apply Global Settings (Env Vars)
         self._apply_global_settings()
 
-        # Update model with UserValves (Preferences)
-        # Note: Auth keys are not merged here, they are resolved at generation time.
-        self.st.model.update(
-            {
-                k: v
-                for k, v in self.user_valves.model_dump().items()
-                if v is not None and not k.endswith("_auth")
-            }
-        )
+        # 2. Merge User Valves - CRITICAL FIX
+        # Do NOT overwrite keys that have been explicitly set via CLI (overridden_keys)
+        protected = self.st.model.overridden_keys
+        if self.st.model.debug:
+            self.debug.log(
+                f"Context: Protecting CLI keys from UserValve Overwrite: {protected}"
+            )
+
+        uv_dump = self.user_valves.model_dump()
+        for k, v in uv_dump.items():
+            # Skip if key is protected (e.g., 'size' set by sz=256)
+            if k in protected:
+                continue
+            # Skip auth keys (handled at generation time)
+            if k.endswith("_auth"):
+                continue
+
+            if v is not None:
+                self.st.model[k] = v
 
         if self.st.model.trigger == "img":
             await self._check_vision_capability()
@@ -2137,19 +2255,51 @@ class Filter:
     def _apply_global_settings(self):
         """
         Merges global environment variables from Open WebUI config into the state.
+        Fixes the PersistentConfig type error by unwrapping values before casting.
         """
-
         conf = getattr(self.request.app.state.config, "_state", {})
-        eng = str(self._unwrap(conf.get("IMAGE_GENERATION_ENGINE", "none"))).lower()
-        sets = {"engine": eng}
 
-        for k in ["IMAGE_GENERATION_MODEL", "IMAGE_SIZE", "IMAGE_STEPS"]:
-            sets[self._clean_key(k, eng)] = self._unwrap(conf.get(k))
+        # Helper to safely get and unwrap a value
+        def get_val(key):
+            return self._unwrap(conf.get(key))
 
-        for k in self.config.ENGINE_MAP.get(eng, []):
-            val = self._unwrap(conf.get(k))
+        eng = str(get_val("IMAGE_GENERATION_ENGINE") or "none").lower()
 
+        # Protected keys from CLI (Override Protection)
+        prot = self.st.model.overridden_keys
+
+        # Apply Engine
+        if "engine" not in prot:
+            self.st.model.engine = eng
+
+        # Apply Model
+        if "model" not in prot:
+            val = get_val("IMAGE_GENERATION_MODEL")
+            if val:
+                self.st.model.model = val
+
+        # Apply Size
+        if "size" not in prot:
+            val = get_val("IMAGE_SIZE")
+            if val:
+                self.st.model.size = val
+
+        # Apply Steps (CRITICAL FIX: Unwrap before int casting)
+        if "steps" not in prot:
+            val = get_val("IMAGE_STEPS")
             if val is not None:
-                sets[self._clean_key(k, eng)] = val
+                try:
+                    self.st.model.steps = int(val)
+                except (ValueError, TypeError):
+                    pass  # Keep default if conversion fails
 
-        self.st.model.update(sets)
+        # Apply Engine-Specific Settings
+        # These are generally safe as they are stored in the dict, but we unwrap them too.
+        for k in self.config.ENGINE_MAP.get(eng, []):
+            clean_k = self._clean_key(k, eng)
+            if clean_k not in prot:
+                val = get_val(k)
+                if val is not None:
+                    self.st.model[clean_k] = val
+
+        self.st.model.update({})
