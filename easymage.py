@@ -1,18 +1,12 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.1
+version: 0.9.1-beta.4
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
 author_email: annibale.x@gmail.com
 Description: Advanced generation filter with Unified Auth, UserValves, Strict CLI Validation and extensive debugging.
 """
-
-# TODO: Quando chiavi arrivano da Valves (non UserValves) riportarle nel debug indicando che sono Global
-# TODO: Cambiare param ge in en (ge sembra gemini)
-# FIXME: LA distilled cfg scale non viene passata, o quanto meno non risulta nei details
-# TODO: Verificare per quale ragione i badge compaiono lentamente distanziati uno dall'altro
-
 
 # --- IMPORTS ---
 
@@ -208,6 +202,35 @@ class EasymageConfig:
         RULE: Output ONLY the enhanced prompt.
         RULE: End the response immediately after the last descriptive sentence.
         RULE: Do not add any text, notes, or disclaimers after the prompt.
+    """
+
+    PROMPT_RANDOM_GEN = """
+        ROLE: You are a Creative Director for generative AI art.
+        TASK: Generate a completely random, unique, and highly detailed image description.
+        THEME: Vary wildly between Sci-Fi, Fantasy, Photorealistic, Abstract, Surreal, Cyberpunk, or Classical Art.
+        {style_instruction}
+        RULE: Output ONLY the prompt description. Do not add introductions, quotes or markdown.
+    """
+
+    HELP_TEXT = """
+### 🪄 Easymage Manual
+**Advanced Generation Filter**
+
+Easymage allows granular control over image generation directly from the chat.
+
+**Usage Syntax:**
+`img:[cmd] [flags] prompt --no negative_prompt`
+
+**Subcommands:**
+- `img`: Standard generation (Text + Vision Audit).
+- `img:p`: Prompt Enhancer only (No generation).
+- `img:r`: Random "I'm Feeling Lucky" mode.
+- `img ?`: Show this help menu.
+
+**Examples:**
+- `img A cat in space` (Default)
+- `img:r ar=16:9 --no text` (Random Wallpaper)
+- `img ?` (Open Manual)
     """
 
 
@@ -433,29 +456,18 @@ class NetworkService:
             return r
 
         except httpx.HTTPStatusError as e:
-            # Dump diagnostics only if global debug is OFF (to avoid duplication)
-            if not self.ctx.st.model.debug:
-                print(
-                    f"\n❌ HTTP ERROR {e.response.status_code} | URL: {url}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                try:
-                    print(
-                        f"📦 PAYLOAD DUMP:\n{json.dumps(payload, indent=2)}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                except:
-                    print(
-                        f"📦 PAYLOAD DUMP: {str(payload)}", file=sys.stderr, flush=True
-                    )
-                print(
-                    f"📄 RESPONSE BODY: {e.response.text}\n",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
+            # CRITICAL FIX: Always dump error body on HTTP failure, regardless of debug mode.
+            # This is essential to see OpenAI/Gemini specific error messages (e.g. Safety, Length).
+            print(
+                f"\n❌ HTTP ERROR {e.response.status_code} | URL: {url}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                f"📄 RESPONSE BODY: {e.response.text}\n",
+                file=sys.stderr,
+                flush=True,
+            )
             raise e
 
         except Exception as e:
@@ -782,62 +794,79 @@ class ImageGenEngine:
     # --- PAYLOAD BUILDERS ---
 
     def _prepare_forge(self) -> dict:
-        p = self.ctx.st.model.copy()
-        p["prompt"] = p["enhanced_prompt"]
+        """
+        Constructs a clean, whitelist-based payload for A1111/Forge.
+        Prevents pollution from Open WebUI internal config objects.
+        """
+        m = self.ctx.st.model
 
-        if not p.get("enable_hr"):
-            p["negative_prompt"] = ""
-
+        # Calculate dimensions
         try:
-            w, h = map(int, p.get("size", "1024x1024").split("x"))
-            p["width"], p["height"] = w, h
-
+            w, h = map(int, m.get("size", "1024x1024").split("x"))
         except:
-            p["width"], p["height"] = 1024, 1024
+            w, h = 1024, 1024
 
-        for k in [
-            "trigger",
-            "subcommand",
-            "id",
-            "engine",
-            "user_prompt",
-            "enhanced_prompt",
-            "quality_audit",
-            "persistent_vision_cache",
-            "debug",
-            "vision",
-            "language",
-            "b64_data",
-            "model",
-            "styles",
-            "size",
-            "aspect_ratio",
-            "llm_type",
-            "api_source",
-            "using_official_url",
-            "cli_auth",
-            "_explicit_engine",
-            "_explicit_model",
-            "captured_keys",
-            "overridden_keys",
-        ]:
-            p.pop(k, None)
+        # Base Payload (Standard Txt2Img)
+        payload = {
+            "prompt": m.enhanced_prompt,
+            "negative_prompt": m.negative_prompt,
+            "steps": m.steps,
+            "seed": m.seed,
+            "sampler_name": m.sampler_name,
+            "scheduler": m.scheduler,
+            "cfg_scale": m.cfg_scale,
+            "width": w,
+            "height": h,
+            "n_iter": 1,
+            "batch_size": 1,
+        }
 
-        return p
+        # Flux / SDXL Specifics
+        if m.get("distilled_cfg_scale") is not None:
+            payload["distilled_cfg_scale"] = m.distilled_cfg_scale
+
+        # High-Res Fix
+        if m.enable_hr:
+            payload.update(
+                {
+                    "enable_hr": True,
+                    "hr_scale": m.hr_scale,
+                    "hr_upscaler": m.hr_upscaler,
+                    "hr_second_pass_steps": m.steps,  # Usually matches base steps
+                    "denoising_strength": m.denoising_strength,
+                }
+            )
+
+            if m.get("hr_distilled_cfg") is not None:
+                payload["hr_distilled_cfg"] = m.hr_distilled_cfg
+
+        return payload
 
     def _prepare_openai(self) -> dict:
         m = self.ctx.st.model
+        is_d3 = "dall-e-3" in str(m.model)
 
-        return {
+        # Truncate prompt: DALL-E 2 limit is 1000 chars, DALL-E 3 is 4000.
+        limit = 4000 if is_d3 else 1000
+        final_prompt = m.enhanced_prompt
+
+        if len(final_prompt) > limit:
+            final_prompt = final_prompt[:limit]
+
+        payload = {
             "model": m.model or "dall-e-3",
-            "prompt": m.enhanced_prompt,
+            "prompt": final_prompt,
             "n": 1,
-            "size": m.size or "1024x1024",
-            "quality": "hd" if m.enable_hr else "standard",
-            "style": "natural" if m.style == "natural" else "vivid",
+            "size": m.size,
             "response_format": "b64_json",
             "user": self.ctx.user.id,
         }
+
+        if is_d3:
+            payload["quality"] = "hd" if m.enable_hr else "standard"
+            payload["style"] = "natural" if m.style == "natural" else "vivid"
+
+        return payload
 
     def _prepare_gemini(self, method: str) -> dict:
         """
@@ -849,12 +878,12 @@ class ImageGenEngine:
             # Payload for standard Gemini API (Google AI Studio)
             # FIXED: Implemented correct structure for Gemini 2.5 Flash Image
             # using responseModalities and imageConfig.
-            
+
             payload = {
                 "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
                 "generationConfig": {
                     "candidateCount": 1,
-                    "responseModalities": ["IMAGE"], # Explicitly request IMAGE mode
+                    "responseModalities": ["IMAGE"],  # Explicitly request IMAGE mode
                 },
             }
 
@@ -902,7 +931,6 @@ class ImageGenEngine:
                 params["seed"] = m.seed
 
             return {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
-
 
     # --- HTTP HANDLERS ---
 
@@ -1085,13 +1113,13 @@ class ImageGenEngine:
         # 3. Smart Method Detection
         # Gemini 2.5 Flash Image and similar use generateContent.
         # Legacy Imagen models use predict.
-        
+
         model_name = self.ctx.st.model.model or "gemini-2.0-flash"
-        
+
         if "imagen" in model_name.lower():
             method = "predict"
         elif "generativelanguage.googleapis.com" in base_url:
-            method = "generateContent" 
+            method = "generateContent"
         else:
             # Fallback for Vertex Enterprise endpoints
             method = "predict"
@@ -1130,9 +1158,9 @@ class ImageGenEngine:
                 # Check for candidates
                 candidates = res.get("candidates", [])
                 if not candidates:
-                     if "promptFeedback" in res:
-                         raise Exception(f"Request Blocked: {res['promptFeedback']}")
-                     raise Exception("No candidates returned from Gemini.")
+                    if "promptFeedback" in res:
+                        raise Exception(f"Request Blocked: {res['promptFeedback']}")
+                    raise Exception("No candidates returned from Gemini.")
 
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if not parts:
@@ -1143,7 +1171,7 @@ class ImageGenEngine:
                     if "inlineData" in part:
                         img_b64 = part["inlineData"]["data"]
                         break
-                
+
                 # If no image found after scanning all parts, raise error
                 if not img_b64:
                     text_content = "No text content"
@@ -1151,7 +1179,9 @@ class ImageGenEngine:
                         if "text" in part:
                             text_content = part["text"]
                             break
-                    raise Exception(f"Model response did not contain an image. Output: {text_content}")
+                    raise Exception(
+                        f"Model response did not contain an image. Output: {text_content}"
+                    )
 
             else:
                 # :predict endpoint (Imagen)
@@ -1162,7 +1192,9 @@ class ImageGenEngine:
 
         except Exception as e:
             if self.ctx.st.model.debug:
-                 self.ctx.debug.log(f"[GEN] GEMINI RAW ERROR RESPONSE: {json.dumps(res, indent=2)}")
+                self.ctx.debug.log(
+                    f"[GEN] GEMINI RAW ERROR RESPONSE: {json.dumps(res, indent=2)}"
+                )
             raise Exception(f"Gemini API Error ({method}): {str(e)}")
 
         self.ctx.st.model.b64_data = img_b64
@@ -1209,6 +1241,10 @@ class PromptParser:
             "ar": "aspect_ratio",
             "cs": "cfg_scale",
             "dns": "denoising_strength",
+            "dcs": "distilled_cfg_scale",
+            "hdcs": "hr_distilled_cfg",
+            "hr": "hr_scale",
+            "hru": "hr_upscaler",
         }
 
     def parse(self, user_prompt: str):
@@ -1222,8 +1258,12 @@ class PromptParser:
         m_st = self.ctx.st.model
         clean, neg = user_prompt, ""
 
-        if " --no " in clean.lower():
-            clean, neg = re.split(r" --no ", clean, maxsplit=1, flags=re.IGNORECASE)
+        # FIX: Robust negative prompt split handling both '--no' and em-dash '—no'
+        # Handles case-insensitive splitting.
+        split_match = re.search(r"\s+(?:--|—)no\s+", clean, re.IGNORECASE)
+        if split_match:
+            clean = user_prompt[: split_match.start()]
+            neg = user_prompt[split_match.end() :]
 
         if " -- " in clean:
             prefix, subj = clean.split(" -- ", 1)
@@ -1257,7 +1297,7 @@ class PromptParser:
                 self.ctx.debug.log(f"[PARSER] Found key: {k} = {v}")
 
             try:
-                if k == "ge":
+                if k == "en":
                     m_st["engine"] = {
                         "a": self.config.Engines.FORGE,
                         "o": self.config.Engines.OPENAI,
@@ -1600,7 +1640,7 @@ class Filter:
 
         # Whitelist Validation (Unknown Parameters)
         allowed_keys = [
-            "ge",
+            "en",
             "mdl",
             "mod",
             "m",
@@ -1625,7 +1665,9 @@ class Filter:
                 errors.append(f"Unknown parameter: '{k}'")
 
         # Empty Subject check
-        if not m.user_prompt or len(m.user_prompt.strip()) < 2:
+        # MODIFIED: Allow empty subject if subcommand is 'r' (Random)
+        is_random_mode = m.subcommand == "r"
+        if (not m.user_prompt or len(m.user_prompt.strip()) < 2) and not is_random_mode:
             errors.append("Validation Error: No subject description provided.")
 
         # Engine/Model Incompatibility (Explicit Override Conflict)
@@ -1686,14 +1728,14 @@ class Filter:
             self.st = None
             return body
 
-        # UPDATED: Unpack subcommand
+        # Unpack trigger data: trigger='img', raw_p='prompt...', subcommand='p'|'r'|'?'|None
         trigger, raw_p, subcommand = trigger_data
 
         # 1. IMMEDIATE STATE CREATION
         self.request = __request__
         self.user = UserModel(**__user__)
 
-        # POPULATION OF USERVALVES (FIXED)
+        # POPULATION OF USERVALVES
         # Check if valves data is already an instance or a dictionary to prevent unpacking errors.
         if __user__ and "valves" in __user__:
             uv_data = __user__["valves"]
@@ -1708,7 +1750,7 @@ class Filter:
 
         self.st = EasymageState(self.valves, self.user_valves)
         self.st.model.trigger = trigger
-        self.st.model.subcommand = subcommand  # ADDED: Store subcommand in state
+        self.st.model.subcommand = subcommand
         self.em = EmitterService(__event_emitter__, self)
 
         if self.st.model.debug:
@@ -1717,6 +1759,14 @@ class Filter:
                 f"[STEP 1/10] Inlet triggered. Trigger type: {trigger} | Sub: {subcommand}"
             )
 
+        # --- FAST EXIT: HELP SYSTEM (SILENT MODE) ---
+        # Immediate short-circuit if subcommand is '?' or 'help'.
+        # We DO NOT emit anything here to avoid flickering. 
+        # Visualization is fully deferred to the outlet.
+        if self.st.model.subcommand in ["?", "help"]:
+            return self._suppress_output(body)
+        # ---------------------------------------------
+
         try:
             metadata = body.get("metadata", {})
             self.st.model.llm_type = metadata.get("model", {}).get("owned_by", "ollama")
@@ -1724,12 +1774,12 @@ class Filter:
         except:
             self.st.model.llm_type = "ollama"
 
-        # 2. IMMEDIATE SUPPRESSION
+        # 2. IMMEDIATE SUPPRESSION (For standard generation)
         body = self._suppress_output(body)
 
         # 3. WORKER INITIALIZATION
         self.debug = DebugService(self)
-        self.net = NetworkService(self)  # <--- NEW
+        self.net = NetworkService(self)
         self.inf = InferenceEngine(self)
         self.img_gen = ImageGenEngine(self)
         self.parser = PromptParser(self)
@@ -1746,8 +1796,8 @@ class Filter:
 
             if self.st.validation_errors:
                 # Task 2: Blocking Errors - Abort generation
-                error_msg = "‼️ GENERATION BLOCKED:\n" + "\n".join(
-                    [f"- {e}" for e in self.st.validation_errors]
+                error_msg = "‼️GENERATION BLOCKED:\n" + "\n".join(
+                    [f"→ {e}" for e in self.st.validation_errors]
                 )
                 self.st.output_content = error_msg
                 self.st.executed = True
@@ -1765,7 +1815,7 @@ class Filter:
                 self.debug.log("[STEP 4/10] Setting Up Context")
             await self._setup_context(body, raw_p)
 
-            # --- EARLY DUMP EMISSION (Fixed Condition & Sanitized) ---
+            # --- EARLY DUMP EMISSION (Sanitized) ---
             if self.st.model.debug:
                 self.debug.log("[STEP 4b/10] Emitting Early Debug Dumps")
 
@@ -1824,7 +1874,7 @@ class Filter:
             elif self.valves.easy_cloud_mode and detected_engine:
                 m.engine = detected_engine
 
-            # LOGIC SWITCH: Use subcommand "p" instead of old "imgx" trigger
+            # LOGIC SWITCH: Use subcommand "p" (Prompt Only)
             if self.st.model.subcommand == "p":
                 self.st.output_content = (
                     self.st.model.enhanced_prompt + self.st.output_content
@@ -1832,8 +1882,7 @@ class Filter:
                 self.st.executed = True
 
             else:
-
-
+                # STANDARD GENERATION OR RANDOM (r)
 
                 # VRAM CLEANUP LOGIC
                 E = self.config.Engines
@@ -1850,9 +1899,6 @@ class Filter:
                 elif self.st.model.debug:
                     self.debug.log("[STEP 5/10] VRAM Purge Skipped (Cloud Engine)")
 
-
-
-
                 # Full Generation Mode
                 if self.st.model.debug:
                     self.debug.log("[STEP 6/10] Generating Image")
@@ -1867,7 +1913,9 @@ class Filter:
 
                 # Prepend image to existing content
                 if self.st.output_content:
-                    self.st.output_content = self.st.output_content.strip() + "\n" + img_md
+                    self.st.output_content = (
+                        self.st.output_content.strip() + "\n" + img_md
+                    )
                 else:
                     self.st.output_content = img_md
 
@@ -1899,6 +1947,7 @@ class Filter:
 
         return body
 
+
     async def outlet(
         self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
     ) -> dict:
@@ -1909,15 +1958,32 @@ class Filter:
             self.debug.log(f"[STEP 10/10] Outlet Triggered")
 
         if getattr(self, "st", None) is None or not self.st.executed:
-            return body
+            # Catch-all for when inlet exited early without creating full state (except help)
+            # If st exists but not executed, we check if it was a help command handled in inlet?
+            # actually, help is handled here in outlet now.
+            
+            # Re-check logic: if inlet returned early for help, st exists but executed is False?
+            # Wait, if inlet returns early for help, st is created.
+            pass
 
-        if not self.st.model.trigger:
-            return body
+        # Check if the process was actually triggered (avoid generic non-img messages)
+        # Note: 'st' might be None if check_input failed.
+        if not getattr(self, "st", None) or not self.st.model.trigger:
+             return body
 
         if __event_emitter__:
             self.em.emitter = __event_emitter__
 
-        # FINAL CONTENT INJECTION
+        # FIX: Immediate handling for Help/Info commands in Outlet
+        # This is where we execute the logic to avoid flickering in Inlet
+        if self.st.model.subcommand in ["?", "help"]:
+            await self._handle_help()
+            # Inject the prepared help content into the message body
+            if "messages" in body and len(body["messages"]) > 0:
+                body["messages"][-1]["content"] = self.st.output_content
+            return body
+
+        # FINAL CONTENT INJECTION (Standard Flow)
         if "messages" in body and len(body["messages"]) > 0:
             body["messages"][-1]["content"] = self.st.output_content
 
@@ -2015,48 +2081,101 @@ class Filter:
 
         self.st.model.language = dl if dl else "English"
 
-        # 3. Prompt Enhancement
+        # 3. Prompt Enhancement / Generation Logic
         E = self.config.Engines
-        native_support = (self.st.model.engine == E.GEMINI) or (
-            self.st.model.engine == E.FORGE and self.st.model.enable_hr
-        )
-        # LOGIC SWITCH: Use subcommand "p" instead of "imgx"
-        use_llm_neg = (self.st.model.subcommand == "p") or (not native_support)
 
-        if self.st.model.enhanced_prompt or self.st.model.subcommand == "p":
-            instructions = [
-                self.config.PROMPT_ENHANCE_BASE.format(lang=self.st.model.language),
-                self.config.PROMPT_ENHANCE_RULES,
-            ]
+        # LOGIC BRANCH: Random Mode (img:r)
+        if self.st.model.subcommand == "r":
+            if self.st.model.debug:
+                self.debug.log("[CTX] Entering Random Mode Generation")
 
-            user_content = f"EXPAND THIS PROMPT: {self.st.model.user_prompt}"
+            # Build Style Instructions (Positive & Negative)
+            style_parts = []
 
-            if self.st.model.styles:
-                user_content += f"\nAPPLY THESE STYLES: {self.st.model.styles}"
-
-            if self.st.model.negative_prompt and use_llm_neg:
-                user_content += f"\nAVOID THESE ELEMENTS AT ALL COSTS: {self.st.model.negative_prompt}"
-
-                instructions.append(
-                    self.config.PROMPT_ENHANCE_NEG.format(
-                        negative=self.st.model.negative_prompt
-                    )
+            if self.st.model.user_prompt and len(self.st.model.user_prompt.strip()) > 1:
+                style_parts.append(
+                    f"MANDATORY STYLE/THEME: {self.st.model.user_prompt}"
                 )
 
-            enh = await self.inf._infer(
-                task="Prompt Enhancing",
-                data={"system": "\n".join(instructions), "user": user_content},
-                creative_mode=True,
+            # FIX: Explicitly forbid negative elements in the generation phase
+            if self.st.model.negative_prompt:
+                style_parts.append(
+                    f"ABSOLUTE PROHIBITION: Do NOT include, mention, or describe: {self.st.model.negative_prompt}."
+                )
+
+            style_instruction = "\n".join(style_parts)
+
+            # Generate the random prompt
+            rand_prompt = await self.inf._infer(
+                task="Randomizing Prompt",
+                data={
+                    "system": self.config.PROMPT_RANDOM_GEN.format(
+                        style_instruction=style_instruction
+                    ),
+                    "user": "Generate a random image prompt now.",
+                },
+                creative_mode=True,  # High temperature for variance
             )
 
             self.st.model.enhanced_prompt = (
-                re.sub(r"[\"]", "", enh) if enh else self.st.model.user_prompt
+                re.sub(r"[\"]", "", rand_prompt)
+                if rand_prompt
+                else "A random abstract masterpiece."
             )
 
-        else:
-            self.st.model.enhanced_prompt = re.sub(
-                r"[\"]", "", self.st.model.user_prompt
+            # Overwrite the user prompt for display purposes in citations
+            self.st.model.user_prompt = (
+                f"[Random] {self.st.model.enhanced_prompt[:50]}..."
             )
+
+        # LOGIC BRANCH: Standard Enhancement (img / img:p)
+        else:
+            native_support = (self.st.model.engine == E.GEMINI) or (
+                self.st.model.engine == E.FORGE and self.st.model.enable_hr
+            )
+            use_llm_neg = (self.st.model.subcommand == "p") or (not native_support)
+
+            if self.st.model.enhanced_prompt or self.st.model.subcommand == "p":
+                instructions = [
+                    self.config.PROMPT_ENHANCE_BASE.format(lang=self.st.model.language),
+                    self.config.PROMPT_ENHANCE_RULES,
+                ]
+
+                is_d3 = "dall-e-3" in str(self.st.model.model)
+
+                if self.st.model.engine == E.OPENAI and not is_d3:
+                    instructions.append(
+                        "RULE: The output MUST be strictly under 950 characters. Do not be verbose."
+                    )
+
+                user_content = f"EXPAND THIS PROMPT: {self.st.model.user_prompt}"
+
+                if self.st.model.styles:
+                    user_content += f"\nAPPLY THESE STYLES: {self.st.model.styles}"
+
+                if self.st.model.negative_prompt and use_llm_neg:
+                    user_content += f"\nAVOID THESE ELEMENTS AT ALL COSTS: {self.st.model.negative_prompt}"
+
+                    instructions.append(
+                        self.config.PROMPT_ENHANCE_NEG.format(
+                            negative=self.st.model.negative_prompt
+                        )
+                    )
+
+                enh = await self.inf._infer(
+                    task="Prompt Enhancing",
+                    data={"system": "\n".join(instructions), "user": user_content},
+                    creative_mode=True,
+                )
+
+                self.st.model.enhanced_prompt = (
+                    re.sub(r"[\"]", "", enh) if enh else self.st.model.user_prompt
+                )
+
+            else:
+                self.st.model.enhanced_prompt = re.sub(
+                    r"[\"]", "", self.st.model.user_prompt
+                )
 
         self._validate_and_normalize()
 
@@ -2266,8 +2385,11 @@ class Filter:
 
     def _check_input(self, body: dict) -> Optional[Tuple[str, str, Optional[str]]]:
         """
-        Parses the last user message to detect Easymage triggers ('img' or 'imgx').
-        Updated for v0.9.0-alpha.15: Supports subcommand syntax (img:p, img:?, img:r)
+        Parses the last user message to detect Easymage triggers.
+        Supports:
+        - img:p (Prompt Only)
+        - img:r (Random)
+        - img ? (Help)
         Returns: (trigger, prompt, subcommand)
         """
 
@@ -2280,15 +2402,22 @@ class Filter:
             return None
 
         last = msgs[-1]["content"]
-        txt = last[0].get("text", "") if isinstance(last, list) else last
+        # Safe extraction for both string and list (multimodal) content
+        txt = last[0].get("text", "") if isinstance(last, list) else str(last)
+        
+        # Robustness: Strip whitespace
+        txt = txt.strip()
 
-        # New Regex: Captures 'img' and optional subcommands :p, :?, :r
-        m = re.match(r"^(img)(?::(\?|p|r))?\s", txt, re.IGNORECASE)
+        # FIX: Split Regex to handle 'img:p/r' vs 'img ?'
+        # Group 1: Trigger (img)
+        # Group 2: Colon subcommands (p|r) - Operational commands
+        # Group 3: Space subcommands (?|help) - Help commands
+        m = re.match(r"^(img)(?:(?::\s*(p|r))|(?:\s+(\?|help)))?(?:\s|$)", txt, re.IGNORECASE)
 
         if m:
             trigger = m.group(1).lower()
-            # Capture subcommand (group 2) if present, else None
-            sub = m.group(2).lower() if m.group(2) else None
+            # Capture subcommand from either group (colon or space based)
+            sub = (m.group(2) or m.group(3) or "").lower() or None
             return (trigger, txt[m.end() :].strip(), sub)
 
         return None
@@ -2377,7 +2506,6 @@ class Filter:
         """
         Ensures model parameters (size, aspect ratio, models) are valid for the selected engine.
         """
-
         eng, mdl = (
             self.st.model.get("engine"),
             str(self.st.model.get("model", "")).lower(),
@@ -2407,26 +2535,45 @@ class Filter:
         except:
             w, h, r = 1024, 1024, 1.0
 
+        # CRITICAL FIX: DALL-E 3 supports Rectangles.
+        # DALL-E 2 supports ONLY Squares but allows 256, 512, 1024.
         if eng == E.OPENAI or "dall-e" in mdl:
-            if r > 1.2:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1792x1024",
-                    "16:9",
-                )
-
-            elif r < 0.8:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1024x1792",
-                    "9:16",
-                )
-
+            if "dall-e-3" in mdl:
+                if r > 1.2:
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1792x1024",
+                        "16:9",
+                    )
+                elif r < 0.8:
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1024x1792",
+                        "9:16",
+                    )
+                else:
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1024x1024",
+                        "1:1",
+                    )
             else:
-                self.st.model["size"], self.st.model["aspect_ratio"] = (
-                    "1024x1024",
-                    "1:1",
-                )
+                # DALL-E 2 Logic: Snap to nearest valid square (256, 512, 1024)
+                target = 1024
+                # Use the width from the requested size (e.g. 256 from 256x256)
+                try:
+                    req_w = int(self.st.model.size.split("x")[0])
+                    if req_w <= 256:
+                        target = 256
+                    elif req_w <= 512:
+                        target = 512
+                    else:
+                        target = 1024
+                except:
+                    target = 1024
+
+                self.st.model["size"] = f"{target}x{target}"
+                self.st.model["aspect_ratio"] = "1:1"
 
         else:
+            # Forge, Gemini, ComfyUI: Allow any calculated aspect ratio
             self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
 
     def _apply_global_settings(self):
@@ -2480,3 +2627,64 @@ class Filter:
                     self.st.model[clean_k] = val
 
         self.st.model.update({})
+
+    async def _handle_help(self):
+        """
+        Generates Help/Manual content.
+        Emits citations immediately (events), but buffers text content for the outlet injection.
+        """
+        # 1. Prepare Content with Placeholders for Badges
+        # FIX: Adding [1] [2] [3] allows Open WebUI to link citations as badges
+        full_help_content = self.config.HELP_TEXT + "\n\n**Reference Tables:**\n[1] [2] [3]"
+        
+        # Store content in state, do NOT emit message here to avoid flickering.
+        # The outlet will inject this text atomically.
+        self.st.output_content = full_help_content
+
+        # 2. Shortcuts & Engines Table
+        shortcuts = "\n".join([f"| `{k}` | {v} |" for k, v in self.config.MODEL_SHORTCUTS.items()])
+        engines = "| `en=o` | OpenAI |\n| `en=g` | Gemini |\n| `en=f` | Forge/A1111 |\n| `en=c` | ComfyUI |"
+        
+        tbl_models = f"""
+| Shortcut | Model / Engine |
+| :--- | :--- |
+{shortcuts}
+
+**Engine Codes**
+{engines}
+"""
+        await self.em.emit_citation("⚡ SHORTCUTS", tbl_models, "1", "help-1")
+
+        # 3. Parameters Table
+        tbl_params = """
+| Flag | Description | Example |
+| :--- | :--- | :--- |
+| `sz` | Size (WxH or square) | `sz=1024`, `sz=512x768` |
+| `ar` | Aspect Ratio | `ar=16:9`, `ar=1:1` |
+| `stp` | Steps | `stp=30` |
+| `cfg` | Guidance Scale | `cfg=7.0` |
+| `sd` | Seed | `sd=42` |
+| `smp` | Sampler | `smp=dpm++2m` |
+| `sch` | Scheduler | `sch=karras` |
+| `auth` | Auth Override | `auth=sk-proj-123...` |
+| `+h` | High-Res Fix | `+h` (Enable) |
+| `+p` | Prompt Enhance | `+p` (Force On), `-p` (Off) |
+| `+a` | Audit | `+a` (Force On), `-a` (Off) |
+"""
+        await self.em.emit_citation("🎛️ PARAMETERS", tbl_params, "2", "help-2")
+
+        # 4. Samplers & Schedulers (Forge/Comfy)
+        smp_list = ", ".join([f"`{k}`" for k in self.config.SAMPLER_MAP.keys()])
+        sch_list = ", ".join([f"`{k}`" for k in self.config.SCHEDULER_MAP.keys()])
+        
+        tbl_adv = f"""
+**Supported Samplers (smp=...)**
+{smp_list}
+
+**Supported Schedulers (sch=...)**
+{sch_list}
+"""
+        await self.em.emit_citation("🛠️ ADVANCED", tbl_adv, "3", "help-3")
+        
+        # Mark as executed
+        self.st.executed = True
