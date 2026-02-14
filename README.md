@@ -1,16 +1,21 @@
 
-## 🚀 Easymage 0.9.0a1: Easy Image Generator & Prompt Engineer
+# 🚀 Easymage 0.9.1-beta.8: Multilingual Prompt Enhancer & Vision QC
 
-Easymage is a professional-grade filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img ` or `imgx ` to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
+Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
-This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.9.1a1 introduces critical optimizations for high-end hardware and low-VRAM environments, ensuring stability and speed across all setups.
+This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` and many other that are not natively exposed through the standard Open WebUI interface. Version 0.9.1 introduces a streamlined **Subcommand Architecture** and a **Unified Help System**, creating a seamless bridge between local power-user tools (Forge/ComfyUI) and cloud simplicity (OpenAI/Gemini).
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Filter](https://img.shields.io/badge/Open%20WebUI-Filter-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
-### 🆕 What's New in v0.9.0-alpha.1 (vs v0.6.3)
 
+### 🆕 What's New in v0.9.1-beta.8 (vs v0.6.3)
+
+-   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
+-   **Entropy Engine (Random Mode)**: The new `img:r` command utilizes a sophisticated "Mental Dice Roll" logic within the LLM to generate radically diverse prompts across 6 distinct macro-categories (Nature, Street Photography, Art, Pop Culture, Architecture, Abstract), avoiding common AI clichés like jellyfish or nebulas.
+-   **Integrated Help System**: Typing `img ?` or simply `img` (with no prompt) now injects a visual manual directly into the chat. It creates interactive citation badges for models, parameters, and engine codes, eliminating the need to memorize syntax.
+-   **Expanded High-Res Parameters**: Added granular control for Forge upscaling via CLI, including `hr` (scale), `hru` (upscaler model), `dns` (denoising strength), and `hdcs` (distilled CFG).
 -   **High-Performance Connection Pooling**: Implements a global, persistent HTTP client for Ollama, OpenAI, and Forge. Eliminates handshake latency and keeps connections alive for instant response times.
 -   **Direct API Dispatch**: Completely bypasses Open WebUI's internal chat completion logic. Requests are sent directly to the backend (Ollama/OpenAI), preventing history pollution and database bloat.
 -   **Environment-Agnostic VRAM Management**:
@@ -20,15 +25,29 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 -   **Engine-Level Determinism**: Custom dispatcher for Ollama/OpenAI ensures 1:1 seed reproducibility by bypassing middleware interference.
 -   **Selective Negation Strategy**: Smart logic chooses between native API or LLM integration based on engine support and Hires Fix status.
 -   **Universal CLI Syntax**: Full control via `sz=`, `stp=`, `sd=`, `dcs=`, `hdcs=`, and specialized shortcuts.
--   **IMGX Text Mode**: Extract enhanced prompts as natural text without generating images.
 -   **Dual-Layer Negative Prompts**: Automatic fallback to AVOID protocol for limited engines (OpenAI/Comfy).
 -   **Refined Error Interception**: Unified handling for backend timeouts and API failures via Docker logging and UI alerts.
 
 ---
 
+### ⚡ Quick Start (Copy & Paste)
+
+New to Easymage? Try these commands to see what it can do.
+
+| Goal | Command | What it does |
+| :--- | :--- | :--- |
+| **Simple** | `img A futuristic city made of glass` | Generates a 1024x1024 image using your default settings. |
+| **Portrait** | `img ar=9:16 An astronaut in a flower field` | Creates a vertical image (Instagram/Reels format). |
+| **Advanced** | `img sz=1280x720 +h -- A cyberpunk street rain` | Widescreen HD image with **High-Res Fix** enabled for extra detail. |
+| **Random** | `img:r watercolor, peaceful` | Let the AI decide the subject, using "watercolor" as a style guide. |
+| **Native Lang**| `img Un gatto che beve caffè` | **Write in Italian/French/German!** Easymage translates and optimizes it for the model. |
+
+---
+
 ### ✨ Key Features
 
-*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for `Forge (A1111)`, `OpenAI (DALL-E-3 / DALL-E-2)`, and `Gemini (Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
+*   **🌍 Multilingual Native**: You don't need to speak English to get professional results. Write your prompt in **Italian, Spanish, French, or German**. Easymage detects the language, translates it, and expands it into technical English optimized for the specific generation model.
+*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for `Forge (A1111)`, `OpenAI (DALL-E-3 / DALL-E-2)`, and the full `Google Ecosystem (Gemini 1.5/2.0/3 Flash/Pro & Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
 *   **VRAM Auto-Optimization**: Automatically manages your GPU memory. Before generating an image, Easymage checks your Ollama server and unloads unused models to ensure Forge or ComfyUI have enough VRAM to operate without crashing.
 *   **Zero-Latency Dispatch**: Uses a persistent connection pool to communicate with backends. This reduces the time-to-first-token and image generation start time by eliminating repetitive network handshakes.
 *   **Selective Negation Strategy**: A smart logic core that determines how to handle negative prompts. It automatically decides whether to use native API fields (for Gemini or Forge with Hires Fix) or to "inject" the negation into the LLM-enhanced description (for OpenAI and ComfyUI), ensuring perfect visual results.
@@ -51,18 +70,24 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ---
 ## Universal CLI (Command Line Interface)
 
-
 ### 💡 Core Usage & Syntax
 
-Easymage is activated by prepending a trigger command to your message. It parses technical instructions, stylistic choices, and the subject in a single pass.
+Easymage is activated by prepending a specific trigger command to your message. It parses technical instructions, stylistic choices, and the subject in a single pass.
 
-#### Base Commands
-*   `img [prompt]`: **Full Generation Mode**. Triggers the entire pipeline: prompt enhancement, multi-engine generation, and visual quality audit.
-*   `imgx [prompt]`: **Text-Only / Preview Mode**. Executes language detection and prompt enhancement only. It returns the final expanded prompt as text, perfectly formatted for manual use or debugging.
+#### Subcommand Architecture
+*   `img [prompt]`: **Standard Generation**. Triggers the full pipeline: Prompt Enhancement → Image Generation → Vision Audit.
+*   `img:p [prompt]`: **Prompt Only Mode**. Executes language detection and prompt enhancement logic but stops *before* generating the image. Useful for iterating on prompt engineering without burning compute credits or time.
+*   `img:r [styles]`: **Random / "I'm Feeling Lucky" Mode**. The LLM acts as an "Engine of Total Entropy," rolling virtual dice to select a subject and style from diverse categories (Nature, Sci-Fi, Art, etc.). Any text you provide is treated as a **Style Constraint**, not a subject.
+*   `img ?`: **Manual Mode**. Displays the help menu, shortcuts, and parameter tables directly in the chat. Typing just `img` (with no prompt) also triggers this mode.
 
 #### Command Structure
 The universal format is:
-`img [ flags ] [ parameters ] [ styles -- ] [ subject] [ --no negative prompt ]`
+`img:[subcmd] [ flags ] [ parameters ] [ styles -- ] [ subject] [ --no negative prompt ]`
+
+> ⚠️ **CRITICAL SYNTAX RULE**:
+> If a parameter value contains **spaces**, you MUST use double quotes!
+> *   ✅ Correct: `smp="Euler a"`
+> *   ❌ Wrong: `smp=Euler a`
 
 | Part | Example | Description |
 | :--- | :--- | :--- |
@@ -70,14 +95,11 @@ The universal format is:
 | **Flags** | `+h -a` | Single-character toggles to enable (`+`) or disable (`-`) features. |
 | **Styles** | `neon, 8k, macro` | Stylistic keywords that steer the LLM enhancer. |
 |  **Subject**  | `-- a lonely robot` | The main content of your image. The `-- ` separator is **mandatory only if you are specifying Styles** to distinguish them from the Subject. |
-| **Negative Prompt**| `--no people, blur` | Elements to exclude. The `--no ` separator triggers the logic fallback system. |
+| **Negative Prompt**| `--no people, blur` | Elements to exclude. The `--no ` (or `—no`) separator triggers the logic fallback system. |
 
 > 💡 **Smart Parsing**: If you only use technical parameters (like `sz=1024` or `+h`), Easymage automatically identifies the Subject as everything following the last parameter. You only need the `-- ` separator when you want to provide descriptive Styles (e.g., `img sz=1024 cinematic, low-angle -- a giant tree`).
 
-
-Certamente. Ecco una nuova sezione per il README che spiega in dettaglio la logica di priorità con cui vengono applicati i parametri, mantenendo lo stile e la formattazione del documento originale.
-
-####  Configuration Hierarchy & Precedence
+#### Configuration Hierarchy & Precedence
 
 Easymage uses an intelligent, three-layer system to determine which settings to apply for each image generation. This tiered approach gives you maximum flexibility, allowing for quick, one-time experiments without altering your preferred defaults. The rule is simple: **more specific settings always override more general ones.**
 
@@ -98,8 +120,6 @@ Let's see how this works for the **`size`** parameter:
 3.  **CLI Override**: You want to create a single widescreen image. You type `img sz=1792x1024 a cat`. For this specific request, Easymage will ignore both the Global setting and your Valve, generating a `1792x1024` image.
 
 The next time you type `img a dog`, it will revert to using your Valve setting of `512x512`.
-
-
 
 ---
 
@@ -124,6 +144,7 @@ These parameters allow you to override backend settings directly from the chat.
 | `hru` | `hru=Latent` | **H**igh-**R**es **U**pscaler. Specifies the upscaling model. | A1111 / Forge |
 | `hdcs` | `hdcs=3.5` | **H**ires **D**istilled **C**FG. Distilled scale during the HR pass. | A1111 / Forge |
 | `dns` | `dns=0.45` | **D**e**n**oi**s**ing Strength. Intensity of the HR fix pass. | A1111 / Forge |
+| `auth` | `auth=sk..`| **Auth**entication. Overrides global/valve keys for this request. | All |
 
 #### Command Line Flags (Toggles)
 Flags provide a quick way to override your default **Valves** configuration for a single message.
@@ -155,12 +176,21 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 <details>
 <summary><strong>Model Shortcuts (`mdl=...`)</strong></summary>
 
-| Shortcut | API Model Name / Identifier |
-| :--- | :--- |
-| `d3` | `dall-e-3` |
-| `d2` | `dall-e-2` |
-| `i3` | `imagen-3.0-generate-001` |
-| `i3f` | `imagen-3.0-fast-generate-001` |
+| Shortcut | API Model Name / Identifier | Note / Description |
+| :--- | :--- | :--- |
+| **OpenAI** | | |
+| `d3` | `dall-e-3` | Standard DALL-E 3 |
+| `d2` | `dall-e-2` | Legacy DALL-E 2 |
+| `g4o` | `gpt-4o` | Multimodal |
+| **Google Imagen Series** | | |
+| `i4` | `imagen-4.0-generate-001` | **Imagen 4 (Full)** - Standard 2026 |
+| `veo` | `veo-3.0-generate-preview` | **Veo 3** (Frame Gen / 4K) |
+| **Google Gemini Series** | | |
+| `g2.5f` | `gemini-2.5-flash-image` | **Nano Banana** (Flash / Fast) |
+| `g3` | `gemini-3-pro-image-preview` | **Nano Banana Pro** (High Quality) |
+| **Local / Forge** | | |
+| `flux` | `flux1-dev.safetensors` | Flux 1 Dev |
+| `sdxl` | `sd_xl_base_1.0.safetensors` | SDXL Base |
 </details>
 
 <details>
@@ -219,7 +249,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 
 One of the most complex challenges in AI image generation is "negation" (telling the AI what *not* to include). Most engines are designed to follow positive instructions and often struggle with negative ones unless they are formatted specifically for their architecture.
 
-Easymage, from v0.8.12, introduces a **Selective Negation Strategy** that automatically chooses the best method to handle your `--no ` requirements.
+Easymage introduces a **Selective Negation Strategy** that automatically chooses the best method to handle your `--no ` requirements.
 
 #### 1. Native API Handling (High Fidelity)
 If the generation engine has a dedicated technical field for negative prompts, Easymage passes your exclusions directly to the API. This provides a "surgical" removal of elements without affecting the creative description of the main subject.
@@ -228,7 +258,7 @@ If the generation engine has a dedicated technical field for negative prompts, E
 
 #### 2. LLM Fallback Integration (Natural Description)
 Many engines (like DALL-E 3) do not have a native "Negative Prompt" field. For these cases, or when Forge is used in standard mode, Easymage uses its **LLM Prompt Engineer** to "digest" the exclusions.
-*   Instead of simply appending a list of words, the LLM rewrites the description to ensure those elements are logically absent. 
+*   Instead of simply appending a list of words, the LLM rewrites the description to ensure those elements are logically absent.
 *   *Example*: If you specify `--no people`, the LLM won't just say "no people"; it will describe a "completely deserted, silent landscape where no human presence is visible," which is much more effective for models like DALL-E.
 
 #### Summary Logic Table
@@ -240,7 +270,7 @@ Many engines (like DALL-E 3) do not have a native "Negative Prompt" field. For t
 | **Forge (Hires Fix ON)** | Native | Sent to the technical `negative_prompt` field. |
 | **Forge (Standard)** | LLM Fallback | Integrated into the descriptive prompt by the LLM. |
 | **ComfyUI (Fallback)** | LLM Fallback | Integrated into the descriptive prompt by the LLM. |
-| **`imgx` Trigger** | LLM Fallback | Always integrated into the text to provide a ready-to-use natural prompt. |
+| **`img:p` Trigger** | LLM Fallback | Always integrated into the text to provide a ready-to-use natural prompt. |
 
 ---
 
@@ -250,7 +280,6 @@ When the LLM Fallback is active, the system prompt for the Enhancer is dynamical
 ---
 
 ## Intelligent Engine Router
-
 
 ### ⚙️ Engine & Parameter Mapping
 
@@ -285,7 +314,7 @@ Easymage acts as a high-level abstraction layer. It converts universal parameter
 | **-** | `response_format` | ⚠️ **Hardcoded to `b64_json`**. |
 
 #### 3. Gemini (Imagen 3) (Direct HTTPX)
-*Connection: Sends a direct POST request to Google's `:predict` endpoint.*
+*Connection: Sends a direct POST request to Google's `:predict` or `:generateContent` endpoint.*
 | EasyMage Parameter | Gemini API Field | Technical Logic |
 | :--- | :--- | :--- |
 | **enhanced_prompt** | `instances[0].prompt` | Main prompt. |
@@ -326,10 +355,9 @@ Easymage handles dimensions dynamically to satisfy different engine requirements
 ---
 ## Configuration & Diagnostics
 
-
 ### 🔧 Filter Configuration (Valves)
 
-Valves allow you to set the "factory defaults" for Easymage. You can find these settings in your Open WebUI profile under `Settings > Filters > Easymage`. 
+Valves allow you to set the "factory defaults" for Easymage. You can find these settings in your Open WebUI profile under `Settings > Filters > Easymage`.
 
 **Note**: Any command sent via CLI (e.g., `sz=512x512`) will temporarily override these global settings for that specific message.
 
@@ -366,6 +394,7 @@ Easymage provides a transparent output system. Beneath the generated image, you 
 *   `[🚀 PROMPT]`: Shows the **Enhanced Prompt** (the text actually seen by the GPU) followed by a structured recap of your original **Styles** and **Negative Prompt**.
 *   `[🟢 SCORE: XX%]`: The result of the Visual Quality Audit. It includes a technical critique and a colored emoji indicator based on the score (80+ 🟢, 70+ 🔵, 60+ 🟡, 40+ 🟠, <40 🔴).
 *   `[🔍 DETAILS]`: A full technical recap including the backend Engine used, the active Model, Resolution, and specific latency for each pipeline stage.
+*   `[ℹ️ INFO]`: (Help Mode only) Displays version metadata and project links.
 
 #### 2. Real-Time Performance Tracking
 The final status bar provides a detailed snapshot of the generation efficiency:
@@ -396,11 +425,11 @@ Easymage is constantly evolving. Here are the key features currently in the pipe
 -   **Filter Chainability**: Insert EM logic into the native filters sequence, allowing it to interact with, modify, or pass data to other active filters.
 
 -   **Multi-Image & Batching**: Support for generating multiple iterations in a single call and automated batch processing for high-volume workflows.
-    
+
 -   **ComfyUI Native Integration**: Bridging the gap with ComfyUI backends to leverage its node-based power directly through Easymage's streamlined syntax.
-    
+
 -   **Fine-Tuned Control (LoRAs)**: Comprehensive support for custom LoRA injection (A1111/Forge & ComfyUI), enabling precise style and character consistency.
-    
+
 -   **Image-to-Image (Img2Img)**: Implementation of the Img2Img pipeline, allowing users to use reference images as a foundation for Easymage-driven transformations.
 
 ---
@@ -412,16 +441,16 @@ Easymage is released under the **MIT License**. Feel free to use, modify, and di
 
 ### 🤝 Contributing & Support
 
-**Easymage** is an orchestration layer for a complex and fragmented ecosystem. While developed on high-end hardware, its core mission is universal compatibility and robust control. Given the thousands of possible combinations between LLMs, Image Engines, and UI parameters, this version is a **Public Alpha**.
+**Easymage** is an orchestration layer for a complex and fragmented ecosystem. While developed on high-end hardware, its core mission is universal compatibility and robust control. Given the thousands of possible combinations between LLMs, Image Engines, and UI parameters, this version is a **Public Beta**.
 
 We actively encourage feedback and issue reports regarding:
 
 -   **Engine Mappings:** Incorrect parameter translations or missing features.
-    
+
 -   **Runtime Errors:** Crashes, hangs, or unexpected behavior in the Open WebUI pipeline.
-    
+
 -   **Environment Issues:** Compatibility bugs across different hardware or Docker setups.
-    
+
 
 Help us harden the orchestration logic by reporting any anomaly you encounter.
 

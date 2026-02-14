@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.7
+version: 0.9.1-beta.8
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.models.users import UserModel  # type: ignore
 
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.1-beta.7"
+EM_VERSION = "0.9.1-beta.8"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
@@ -35,7 +35,6 @@ HTTP_CLIENT = httpx.AsyncClient()
 
 
 # --- CONFIGURATION & MAPS ---
-
 
 class EasymageConfig:
     """
@@ -56,7 +55,7 @@ class EasymageConfig:
     }
 
     # Maps short codes or alternative names to the specific sampler names.
-    SAMPLER_MAP = {
+    FORGE_SAMPLER_MAP = {
         "d3s": "DPM++ 3M SDE",
         "d2sh": "DPM++ 2M SDE Heun",
         "d2s": "DPM++ 2M SDE",
@@ -84,7 +83,7 @@ class EasymageConfig:
     }
 
     # Maps short codes to scheduler names.
-    SCHEDULER_MAP = {
+    FORGE_SCHEDULER_MAP = {
         "a": "Automatic",
         "u": "Uniform",
         "k": "Karras",
@@ -111,20 +110,22 @@ class EasymageConfig:
         Engines.GEMINI: ["IMAGES_GEMINI_API_KEY", "IMAGES_GEMINI_ENDPOINT_METHOD"],
     }
 
-    # Expanded Model Shortcuts
+    # Expanded Model Shortcuts (COMPLETE RESTORATION)
     MODEL_SHORTCUTS = {
         # OpenAI
         "d3": "dall-e-3",
         "d2": "dall-e-2",
-        "g4o": "gpt-4o",
-        "g4om": "gpt-4o-mini",
-        # Gemini (Smart Chunk Initials)
-        "g3pip": "gemini-3-pro-image-preview",
-        "g2.5fi": "gemini-2.5-flash-image",
-        "g2f": "gemini-2.0-flash",
-        "g2fe": "gemini-2.0-flash-exp",
-        "i3": "imagen-3.0-generate-001",
-        "i3f": "imagen-3.0-fast-generate-001",
+        "g4o": "gpt-4o",             
+        "g4om": "gpt-4o-mini",       
+
+        # Google Imagen Series (Endpoint: :predict)
+        "i4": "imagen-4.0-generate-001",           # CURRENT STANDARD
+        "veo": "veo-3.0-generate-preview",         # Veo 3 (Frame Gen)
+
+        # Google Nano Banana / Gemini (Endpoint: :generateContent)
+        "g2.5f": "gemini-2.5-flash-image",          # Nano Banana (Fast)
+        "g3": "gemini-3-pro-image-preview",        # Nano Banana Pro (High Quality)
+
         # Local / Forge
         "flux": "flux1-dev.safetensors",
         "sdxl": "sd_xl_base_1.0.safetensors",
@@ -135,12 +136,16 @@ class EasymageConfig:
     MODEL_ENGINE_MAP = {
         "dall-e-3": Engines.OPENAI,
         "dall-e-2": Engines.OPENAI,
-        "gemini-3-pro-image-preview": Engines.GEMINI,
+        "gpt-4o": Engines.OPENAI,       
+        "gpt-4o-mini": Engines.OPENAI,  
+
+        # Google Ecosystem
+        "imagen-4.0-generate-001": Engines.GEMINI,
+        "veo-3.0-generate-preview": Engines.GEMINI,
         "gemini-2.5-flash-image": Engines.GEMINI,
-        "gemini-2.0-flash": Engines.GEMINI,
-        "gemini-2.0-flash-exp": Engines.GEMINI,
-        "imagen-3.0-generate-001": Engines.GEMINI,
-        "imagen-3.0-fast-generate-001": Engines.GEMINI,
+        "gemini-3-pro-image-preview": Engines.GEMINI,
+
+        # Forge
         "flux1-dev.safetensors": Engines.FORGE,
         "sd_xl_base_1.0.safetensors": Engines.FORGE,
     }
@@ -1098,7 +1103,7 @@ class ImageGenEngine:
 
     async def _gen_gemini(self):
         """
-        Executes request against Gemini with Easy Cloud Mode support.
+        Executes request against Gemini/Imagen with strict 2026 API adherence.
         """
         conf = self.ctx.request.app.state.config
         valves = self.ctx.valves
@@ -1108,126 +1113,139 @@ class ImageGenEngine:
         if valves.easy_cloud_mode:
             base_url = self.ctx.config.OFFICIAL_URLS["gemini"]
             self.ctx.st.model.using_official_url = True
-
         else:
             base_url = getattr(conf, "IMAGES_GEMINI_API_BASE_URL", "").rstrip("/")
-
             if not base_url:
-                raise Exception(
-                    "Gemini Base URL missing in Global Settings (and Easy Mode is OFF)."
-                )
+                raise Exception("Gemini Base URL missing. Enable Easy Cloud Mode or check Global Settings.")
 
-        # Auth Hierarchy: CLI > UserValve > Valve > Global
+        # Auth Setup
         cli_auth = self.ctx.st.model.get("cli_auth")
         user_auth = user_valves.gemini_auth
         valve_auth = valves.gemini_auth
         global_key = getattr(conf, "IMAGES_GEMINI_API_KEY", "")
-
         api_key = cli_auth or user_auth or valve_auth or global_key
 
-        if cli_auth:
-            self.ctx.st.model.api_source = "CLI Override"
-
-        elif user_auth:
-            self.ctx.st.model.api_source = "User Profile"
-
-        elif valve_auth:
-            self.ctx.st.model.api_source = "Filter Default"
-
-        else:
-            self.ctx.st.model.api_source = "System Settings"
+        if cli_auth: self.ctx.st.model.api_source = "CLI Override"
+        elif user_auth: self.ctx.st.model.api_source = "User Profile"
+        elif valve_auth: self.ctx.st.model.api_source = "Filter Default"
+        else: self.ctx.st.model.api_source = "System Settings"
 
         if not api_key:
-            raise Exception(
-                "No Gemini API Key found (Checked: CLI, User, Valves, Global)."
-            )
+            raise Exception("No Gemini API Key found.")
 
-        # 3. Smart Method Detection
-        # Gemini 2.5 Flash Image and similar use generateContent.
-        # Legacy Imagen models use predict.
+        # 3. Model & Method Routing
+        # DEFAULT TO IMAGEN 4 (Current Standard)
+        model_name = self.ctx.st.model.model or "imagen-4.0-generate-001"
+        lower_name = model_name.lower()
 
-        model_name = self.ctx.st.model.model or "gemini-2.0-flash"
-
-        if "imagen" in model_name.lower():
+        # ROUTING LOGIC:
+        # "imagen" or "veo" -> :predict (Legacy/Specialized Endpoint)
+        # "gemini" -> :generateContent (Unified Multimodal Endpoint)
+        if any(x in lower_name for x in ["imagen", "veo"]):
             method = "predict"
-        elif "generativelanguage.googleapis.com" in base_url:
-            method = "generateContent"
         else:
-            # Fallback for Vertex Enterprise endpoints
-            method = "predict"
+            method = "generateContent"
 
         url = f"{base_url}/models/{model_name}:{method}"
 
-        # 4. Auth Headers
-        headers = {"Content-Type": "application/json"}
+        # 4. Payload Construction
+        if method == "predict":
+            # IMAGEN 4 / VEO Payload
+            # Documentation: https://ai.google.dev/gemini-api/docs/imagen
+            m = self.ctx.st.model
+            
+            # AR Calculation
+            try:
+                w, h = map(int, (m.size or "1024x1024").split("x"))
+                rat = w/h
+                ar = (
+                    "16:9" if rat > 1.7 else 
+                    ("4:3" if rat > 1.3 else 
+                    ("9:16" if rat < 0.6 else 
+                    ("3:4" if rat < 0.8 else "1:1")))
+                )
+            except: ar = "1:1"
 
+            # STRICT MINIMAL PAYLOAD
+            # Removed 'safetySetting', 'personGeneration', 'addWatermark' to avoid HTTP 400 errors.
+            params = {
+                "sampleCount": 1,
+                "aspectRatio": ar,
+                "outputOptions": {"mimeType": "image/png"},
+            }
+            
+            if m.negative_prompt:
+                params["negativePrompt"] = m.negative_prompt
+
+            if m.seed and m.seed != -1: 
+                params["seed"] = m.seed
+
+            payload = {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
+
+        else:
+            # GEMINI NANO BANANA Payload (:generateContent)
+            # Documentation: https://ai.google.dev/gemini-api/docs/image-generation
+            m = self.ctx.st.model
+            
+            payload = {
+                "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
+                "generationConfig": {
+                    "candidateCount": 1,
+                    "responseModalities": ["IMAGE"],  # MANDATORY for Nano Banana
+                }
+            }
+            
+            # Gemini 2.0+ Image Config (Experimental)
+            if m.aspect_ratio and m.aspect_ratio != "1:1":
+                # Some endpoint versions might ignore this or use different structure
+                # but currently this is the cleanest way to attempt AR on generateContent
+                payload["generationConfig"]["imageConfig"] = {"aspectRatio": m.aspect_ratio}
+
+        # Headers
+        headers = {"Content-Type": "application/json"}
         if "generativelanguage.googleapis.com" in base_url:
             headers["x-goog-api-key"] = api_key
         else:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        payload = self._prepare_gemini(method)
-
-        # Task 4: Debug Log - Payload and URL
         if self.ctx.st.model.debug:
-            self.ctx.debug.log(
-                f"GEMINI: {url} | Method: {method} | EasyMode: {valves.easy_cloud_mode}"
-            )
+            self.ctx.debug.log(f"GEMINI REQUEST: {url} [{method}]")
             self.ctx.debug.log(f"[GEN] GEMINI PAYLOAD: {json.dumps(payload, indent=2)}")
 
-        r = await self.ctx.net.post(
-            url,
-            payload=payload,
-            headers=headers,
-            timeout=valves.generation_timeout,
-        )
+        # 5. Execution & Error Trapping
+        r = await self.ctx.net.post(url, payload=payload, headers=headers, timeout=valves.generation_timeout)
+        
+        # Explicit Error Handling for Chat Visibility
+        if r.status_code >= 400:
+            try:
+                err_body = r.json()
+                err_msg = err_body.get("error", {}).get("message", r.text)
+                # Friendly error mapping
+                if "not supported for predict" in err_msg:
+                    raise Exception(f"Model '{model_name}' mismatch. Try using 'i4' (Imagen 4) or 'g2.5' (Gemini). \nraw: {err_msg}")
+                if "response modalities" in err_msg:
+                    raise Exception(f"Model '{model_name}' cannot generate images. It is likely a text-only model. Use 'g2.5' or 'i4'.")
+                raise Exception(f"Google API Error ({r.status_code}): {err_msg}")
+            except Exception as e:
+                # Re-raise nicely formatted
+                raise Exception(str(e))
 
         res = r.json()
         img_b64 = ""
 
-        try:
-            if method == "generateContent":
-                # Check for candidates
-                candidates = res.get("candidates", [])
-                if not candidates:
-                    if "promptFeedback" in res:
-                        raise Exception(f"Request Blocked: {res['promptFeedback']}")
-                    raise Exception("No candidates returned from Gemini.")
-
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if not parts:
-                    raise Exception("Empty content parts in Gemini response.")
-
-                # Iterate ALL parts to find the image (inlineData).
-                for part in parts:
-                    if "inlineData" in part:
-                        img_b64 = part["inlineData"]["data"]
-                        break
-
-                # If no image found after scanning all parts, raise error
-                if not img_b64:
-                    text_content = "No text content"
-                    for part in parts:
-                        if "text" in part:
-                            text_content = part["text"]
-                            break
-                    raise Exception(
-                        f"Model response did not contain an image. Output: {text_content}"
-                    )
-
-            else:
-                # :predict endpoint (Imagen)
-                if "predictions" in res:
-                    img_b64 = res["predictions"][0]["bytesBase64Encoded"]
-                else:
-                    raise Exception(f"Imagen API Error: {json.dumps(res)}")
-
-        except Exception as e:
-            if self.ctx.st.model.debug:
-                self.ctx.debug.log(
-                    f"[GEN] GEMINI RAW ERROR RESPONSE: {json.dumps(res, indent=2)}"
-                )
-            raise Exception(f"Gemini API Error ({method}): {str(e)}")
+        # Response Parsing
+        if method == "generateContent":
+            # Gemini
+            try:
+                img_b64 = res["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            except:
+                raise Exception(f"No image in Gemini response. Safety block? {json.dumps(res)}")
+        else:
+            # Imagen
+            try:
+                img_b64 = res["predictions"][0]["bytesBase64Encoded"]
+            except:
+                raise Exception(f"No image in Imagen response. {json.dumps(res)}")
 
         self.ctx.st.model.b64_data = img_b64
         self.ctx.st.model.image_url = f"data:image/png;base64,{img_b64}"
@@ -1376,10 +1394,10 @@ class PromptParser:
                     m_st["seed"] = int(v)
 
                 elif k == "smp":
-                    m_st["sampler_name"] = self._norm(v, self.config.SAMPLER_MAP)
+                    m_st["sampler_name"] = self._norm(v, self.config.FORGE_SAMPLER_MAP)
 
                 elif k == "sch":
-                    m_st["scheduler"] = self._norm(v, self.config.SCHEDULER_MAP)
+                    m_st["scheduler"] = self._norm(v, self.config.FORGE_SCHEDULER_MAP)
 
                 elif k == "cs":
                     m_st["cfg_scale"] = float(v)
@@ -1448,7 +1466,7 @@ class PromptParser:
         )
 
         return mapping.get(
-            n, name.capitalize() if mapping is self.config.SCHEDULER_MAP else name
+            n, name.capitalize() if mapping is self.config.FORGE_SCHEDULER_MAP else name
         )
 
 
@@ -1753,7 +1771,9 @@ class Filter:
     ) -> dict:
         """
         Intercepts the incoming request before it reaches the LLM.
+        Main orchestration entry point.
         """
+        # 1. CHECK TRIGGER
         trigger_data = self._check_input(body)
 
         if not trigger_data:
@@ -1763,38 +1783,30 @@ class Filter:
         # Unpack trigger data: trigger='img', raw_p='prompt...', subcommand='p'|'r'|'?'|None
         trigger, raw_p, subcommand = trigger_data
 
-        # 1. IMMEDIATE STATE CREATION
+        # 2. STATE INITIALIZATION
         self.request = __request__
         self.user = UserModel(**__user__)
 
-        # POPULATION OF USERVALVES
-        # Check if valves data is already an instance or a dictionary to prevent unpacking errors.
+        # Populate UserValves safely
         if __user__ and "valves" in __user__:
             uv_data = __user__["valves"]
-
             if isinstance(uv_data, dict):
-                # If it's a raw dictionary, instantiate the model
                 self.user_valves = self.UserValves(**uv_data)
-
             else:
-                # If it's already an instance of UserValves (Pydantic model), assign directly
                 self.user_valves = uv_data
 
+        # Create Easymage State
         self.st = EasymageState(self.valves, self.user_valves)
         self.st.model.trigger = trigger
         self.st.model.subcommand = subcommand
         self.em = EmitterService(__event_emitter__, self)
 
         if self.st.model.debug:
-            self.debug = DebugService(self)
-            self.debug.log(
-                f"[STEP 1/10] Inlet triggered. Trigger type: {trigger} | Sub: {subcommand}"
-            )
+            # Temporary debug service before full init
+            print(f"⚡ [INLET] Triggered: {trigger} | Sub: {subcommand}", file=sys.stderr)
 
         # --- FAST EXIT: HELP SYSTEM (SILENT MODE) ---
         # Immediate short-circuit if subcommand is '?' or 'help'.
-        # We DO NOT emit anything here to avoid flickering.
-        # Visualization is fully deferred to the outlet.
         if self.st.model.subcommand in ["?", "help"]:
             return self._suppress_output(body)
         # ---------------------------------------------
@@ -1802,183 +1814,159 @@ class Filter:
         try:
             metadata = body.get("metadata", {})
             self.st.model.llm_type = metadata.get("model", {}).get("owned_by", "ollama")
-
         except:
             self.st.model.llm_type = "ollama"
 
-        # 2. IMMEDIATE SUPPRESSION (For standard generation)
+        # 3. SUPPRESS LLM OUTPUT (Force silence for generation)
         body = self._suppress_output(body)
 
-        # 3. WORKER INITIALIZATION
+        # 4. WORKER INITIALIZATION
         self.debug = DebugService(self)
         self.net = NetworkService(self)
         self.inf = InferenceEngine(self)
         self.img_gen = ImageGenEngine(self)
         self.parser = PromptParser(self)
 
+        # --- CORE LOGIC BLOCK ---
         try:
-
-            # PHASE 1: Immediate Parsing (Technical Extraction)
+            # PHASE 1: Parsing
             if self.st.model.debug:
-                self.debug.log("[STEP 2/10] Parsing Input")
+                self.debug.log("[STEP 1/10] Parsing Input")
             self.parser.parse(raw_p)
 
-            # PHASE 2: Immediate Validation (Fail-Fast)
+            # PHASE 2: Validation
             self._validate_request()
 
             if self.st.validation_errors:
-                # Task 2: Blocking Errors - Abort generation
-                error_msg = "‼️GENERATION BLOCKED:\n" + "\n".join(
+                # BLOCKING ERROR: Show in chat immediately
+                error_msg = "‼️ GENERATION BLOCKED:\n" + "\n".join(
                     [f"→ {e}" for e in self.st.validation_errors]
                 )
                 self.st.output_content = error_msg
                 self.st.executed = True
-
                 await self.em.emit_status("Validation Failed", True)
                 await self.em.emit_message(error_msg)
-
-                if self.st.model.debug:
-                    self.debug.log("Generation aborted due to validation errors.")
                 return body
 
-            # PHASE 3: Heavy LLM Logic (Setup Context)
-            # Only proceeds if validation passed.
+            # PHASE 3: Context Setup (Heavy Logic)
             if self.st.model.debug:
-                self.debug.log("[STEP 4/10] Setting Up Context")
+                self.debug.log("[STEP 2/10] Setting Up Context")
             await self._setup_context(body, raw_p)
 
-            # --- EARLY DUMP EMISSION (Sanitized) ---
+            # --- EARLY DEBUG DUMP ---
             if self.st.model.debug:
-                self.debug.log("[STEP 4b/10] Emitting Early Debug Dumps")
+                await self._emit_debug_dump()
 
-                # Helper to mask sensitive keys locally
-                def _sanitize(data: dict):
-                    safe = data.copy()
-                    for k, v in safe.items():
-                        # Mask if key contains 'auth', 'key' or is specifically 'cli_auth'
-                        if isinstance(v, str) and (
-                            "auth" in k.lower() or "key" in k.lower()
-                        ):
-                            safe[k] = self._mask_key(v)
-                    return safe
-
-                # Create safe copies for display
-                safe_model = _sanitize(self.st.model)
-                safe_valves = _sanitize(self.user_valves.model_dump())
-
-                # Prepare formatted JSON blocks
-                dump_model = json.dumps(safe_model, indent=2, default=str)
-                dump_valves = json.dumps(safe_valves, indent=2, default=str)
-
-                debug_block = (
-                    f"\n\n<details>\n<summary>🔍 Debug STATE</summary>\n\n"
-                    f"```json\n{dump_model}\n```\n"
-                    f"</details>\n"
-                    f"<details>\n<summary>🔍 Debug VALVES</summary>\n\n"
-                    f"```json\n{dump_valves}\n```\n"
-                    f"</details>\n"
-                )
-
-                # Append to buffer AND Emit Immediately to stream
-                self.st.output_content += debug_block
-                await self.em.emit_message(debug_block)
-
-            # --- SMART ENGINE RECONCILIATION ---
-
+            # --- ENGINE RECONCILIATION ---
             m = self.st.model
             detected_engine = self.config.MODEL_ENGINE_MAP.get(str(m.model).lower())
 
-            if self.st.model.debug:
-                self.debug.log(
-                    f"Reconciliation -> Explicit Engine: {m._explicit_engine}, Explicit Model: {m._explicit_model}, Current Engine: {m.engine}, Detected from Model: {detected_engine}"
-                )
-
             if m._explicit_model and detected_engine:
                 m.engine = detected_engine
-
             elif m._explicit_engine and not m._explicit_model:
                 if detected_engine and detected_engine != m.engine:
-                    self.debug.log(
-                        f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting model."
-                    )
+                    self.debug.log(f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting.")
                     m.model = None
-
             elif self.valves.easy_cloud_mode and detected_engine:
                 m.engine = detected_engine
 
-            # LOGIC SWITCH: Use subcommand "p" (Prompt Only)
+            # --- EXECUTION BRANCHING ---
+
+            # BRANCH A: Prompt Only (img:p)
             if self.st.model.subcommand == "p":
                 self.st.output_content = (
                     self.st.model.enhanced_prompt + self.st.output_content
                 )
                 self.st.executed = True
 
+            # BRANCH B: Generation (img / img:r)
             else:
-                # STANDARD GENERATION OR RANDOM (r)
-
-                # VRAM CLEANUP LOGIC
+                # VRAM Cleanup
                 E = self.config.Engines
                 is_cloud_engine = self.st.model.engine in [E.OPENAI, E.GEMINI]
 
                 if not is_cloud_engine:
-                    if self.st.model.debug:
-                        self.debug.log("[STEP 5/10] Cleaning VRAM")
+                    if self.st.model.debug: self.debug.log("[STEP 5/10] Cleaning VRAM")
                     await self.em.emit_status("Cleaning VRAM..")
+                    await self.inf.purge_vram(unload_current=self.valves.extreme_vram_cleanup)
 
-                    await self.inf.purge_vram(
-                        unload_current=self.valves.extreme_vram_cleanup
-                    )
-                elif self.st.model.debug:
-                    self.debug.log("[STEP 5/10] VRAM Purge Skipped (Cloud Engine)")
-
-                # Full Generation Mode
-                if self.st.model.debug:
-                    self.debug.log("[STEP 6/10] Generating Image")
+                # IMAGE GENERATION
+                if self.st.model.debug: self.debug.log("[STEP 6/10] Generating Image")
+                
+                # This call will raise Exception if API fails (400/404/500)
                 await self.img_gen.generate()
 
-                # Initialize content buffer (Image Markdown only)
+                # Build Output
                 img_md = (
                     f"![Generated Image]({self.st.model.image_url})"
                     if self.st.model.image_url
                     else ""
                 )
-
-                # Prepend image to existing content
+                
                 if self.st.output_content:
-                    self.st.output_content = (
-                        self.st.output_content.strip() + "\n" + img_md
-                    )
+                    self.st.output_content = self.st.output_content.strip() + "\n" + img_md
                 else:
                     self.st.output_content = img_md
 
+                # Vision Audit
                 if self.st.model.quality_audit:
-                    # User sees only image + status bar here. No placeholders yet.
-                    if self.st.model.debug:
-                        self.debug.log("[STEP 7/10] Vision Audit")
+                    if self.st.model.debug: self.debug.log("[STEP 7/10] Vision Audit")
                     await self._vision_audit()
 
-                # Emit placeholders NOW to the live stream.
-                if self.st.model.debug:
-                    self.debug.log("[STEP 8/10] Syncing Placeholders")
-
+                # Emit Placeholders for Outlet
                 await self.em.emit_message("\n\n[1] [2] [3]")
-
-                # Update the persistent buffer for DB save
                 self.st.output_content += "\n\n[1] [2] [3]"
-
+                
                 self.st.executed = True
-
-                if self.st.model.debug:
-                    self.debug.log("[STEP 9/10] Inlet Finished")
+                if self.st.model.debug: self.debug.log("[STEP 9/10] Inlet Finished")
 
         except Exception as e:
+            # --- CRITICAL ERROR HANDLER ---
+            # Catches API Errors (Google 404, OpenAI 400, etc.) and prints them to chat.
+            
+            error_header = "\n\n❌ **GENERATION FAILED**\n"
+            error_body = f"> {str(e)}"
+            full_error = error_header + error_body
+
+            # 1. Log to Console
+            await self.debug.error(f"Inlet Exception: {str(e)}")
+            
+            # 2. Update UI Status
             await self.em.emit_status("Execution Aborted!", True)
-            await self.debug.error(e)
+            
+            # 3. Force Error into Chat Stream
+            # We append it to output_content so outlet() can deliver it safely
             if self.st:
-                self.st.executed = False
+                self.st.output_content += full_error
+                self.st.executed = True # Ensure outlet picks this up
+            
+            # 4. Immediate Emit (in case outlet doesn't trigger on some errors)
+            await self.em.emit_message(full_error)
 
         return body
 
+    async def _emit_debug_dump(self):
+        """Helper to emit sanitized debug info"""
+        def _sanitize(data: dict):
+            safe = data.copy()
+            for k, v in safe.items():
+                if isinstance(v, str) and ("auth" in k.lower() or "key" in k.lower()):
+                    safe[k] = self._mask_key(v)
+            return safe
+
+        safe_model = _sanitize(self.st.model)
+        safe_valves = _sanitize(self.user_valves.model_dump())
+
+        debug_block = (
+            f"\n\n<details>\n<summary>🔍 Debug STATE</summary>\n\n"
+            f"```json\n{json.dumps(safe_model, indent=2, default=str)}\n```\n"
+            f"</details>\n"
+            f"<details>\n<summary>🔍 Debug VALVES</summary>\n\n"
+            f"```json\n{json.dumps(safe_valves, indent=2, default=str)}\n```\n"
+            f"</details>\n"
+        )
+        self.st.output_content += debug_block
+        await self.em.emit_message(debug_block)
     async def outlet(
         self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
     ) -> dict:
@@ -2549,77 +2537,83 @@ class Filter:
     def _validate_and_normalize(self):
         """
         Ensures model parameters (size, aspect ratio, models) are valid for the selected engine.
+        CRITICAL: Sanitizes 'model' field to prevent cross-engine pollution.
         """
-        eng, mdl = (
-            self.st.model.get("engine"),
-            str(self.st.model.get("model", "")).lower(),
-        )
-
+        eng = self.st.model.get("engine")
+        mdl = str(self.st.model.get("model", "")).lower()
         E = self.config.Engines
 
-        # Enforce defaults for specific engines
-        if eng == E.OPENAI and "dall-e" not in mdl:
-            self.st.model["model"] = "dall-e-3"
+        # 1. GOOGLE GEMINI / IMAGEN VALIDATION
+        if eng == E.GEMINI:
+            # Logic: If the model name does not look like a Google model (imagen/gemini/veo),
+            # it is likely pollution from Global Settings (e.g., "automatic1111").
+            # We strictly enforce the 2026 Standard: Imagen 4.
+            is_valid_google = any(k in mdl for k in ["imagen", "gemini", "veo"])
+            
+            if not mdl or not is_valid_google:
+                self.st.model["model"] = "imagen-4.0-generate-001"
 
-        elif eng == E.GEMINI and "imagen" not in mdl and "gemini" not in mdl:
-            self.st.model["model"] = "imagen-3.0-fast-generate-001"
+        # 2. OPENAI VALIDATION
+        elif eng == E.OPENAI:
+            if "dall-e" not in mdl and "gpt-4" not in mdl:
+                self.st.model["model"] = "dall-e-3"
 
-        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
-            "aspect_ratio"
-        )
+        # 3. ASPECT RATIO & SIZE NORMALIZATION
+        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get("aspect_ratio")
 
         try:
-            w, h = map(int, sz.split("x")) if "x" in str(sz) else (int(sz), int(sz))
-            r = (
-                (int(ar.split(":")[0]) / int(ar.split(":")[1]))
-                if ar and ":" in str(ar)
-                else w / h
-            )
-
+            # Parse Width/Height
+            if "x" in str(sz):
+                w, h = map(int, sz.split("x"))
+            else:
+                w, h = int(sz), int(sz)
+            
+            # Calculate Ratio 'r' from AR if present, else from size
+            if ar and ":" in str(ar):
+                num, den = map(int, ar.split(":"))
+                r = num / den
+            else:
+                r = w / h
         except:
             w, h, r = 1024, 1024, 1.0
 
-        # CRITICAL FIX: DALL-E 3 supports Rectangles.
-        # DALL-E 2 supports ONLY Squares but allows 256, 512, 1024.
+        # Engine-Specific Dimension Logic
         if eng == E.OPENAI or "dall-e" in mdl:
+            # DALL-E 3 Logic (Rectangles allowed)
             if "dall-e-3" in mdl:
                 if r > 1.2:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = (
-                        "1792x1024",
-                        "16:9",
-                    )
+                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1792x1024", "16:9")
                 elif r < 0.8:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = (
-                        "1024x1792",
-                        "9:16",
-                    )
+                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1024x1792", "9:16")
                 else:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = (
-                        "1024x1024",
-                        "1:1",
-                    )
+                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1024x1024", "1:1")
             else:
-                # DALL-E 2 Logic: Snap to nearest valid square (256, 512, 1024)
+                # DALL-E 2 Logic (Squares only)
                 target = 1024
-                # Use the width from the requested size (e.g. 256 from 256x256)
                 try:
                     req_w = int(self.st.model.size.split("x")[0])
-                    if req_w <= 256:
-                        target = 256
-                    elif req_w <= 512:
-                        target = 512
-                    else:
-                        target = 1024
-                except:
-                    target = 1024
-
+                    if req_w <= 256: target = 256
+                    elif req_w <= 512: target = 512
+                except: pass
                 self.st.model["size"] = f"{target}x{target}"
                 self.st.model["aspect_ratio"] = "1:1"
 
         else:
-            # Forge, Gemini, ComfyUI: Allow any calculated aspect ratio
-            self.st.model["size"] = f"{w}x{(int(w / r) // 8) * 8}"
+            # Forge, Gemini, ComfyUI: 
+            # 1. Respect Aspect Ratio if provided
+            # 2. Snap dimensions to multiples of 8 (safer for encoders)
+            if ar: 
+                # Recalculate H based on W and AR
+                final_w = w
+                final_h = int(w / r)
+            else:
+                final_w, final_h = w, h
 
+            # Snap to 8
+            final_w = (final_w // 8) * 8
+            final_h = (final_h // 8) * 8
+            
+            self.st.model["size"] = f"{final_w}x{final_h}"
     def _apply_global_settings(self):
         """
         Merges global environment variables from Open WebUI config into the state.
@@ -2697,7 +2691,7 @@ class Filter:
             f"• en=f ➔ Forge/A1111\n"
             f"• en=c ➔ ComfyUI"
         )
-        
+
         await self.em.emit_citation("⚡ SHORTCUTS", sc_content.strip(), "1", "help-1")
 
         # 3. PARAMETERS (Flags)
@@ -2722,8 +2716,8 @@ class Filter:
 
         # 4. ADVANCED (Samplers/Schedulers)
         # Mapping codes to full names
-        smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.SAMPLER_MAP.items()]
-        sch_lines = [f"• {k} ➔ {v}" for k, v in self.config.SCHEDULER_MAP.items()]
+        smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.FORGE_SAMPLER_MAP.items()]
+        sch_lines = [f"• {k} ➔ {v}" for k, v in self.config.FORGE_SCHEDULER_MAP.items()]
 
         adv_content = (
             f"\n\n"
