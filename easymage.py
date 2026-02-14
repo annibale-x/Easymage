@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.6
+version: 0.9.1-beta.7
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -22,6 +22,9 @@ from pydantic import BaseModel, Field
 from open_webui.routers.images import image_generations, CreateImageForm  # type: ignore
 from open_webui.models.users import UserModel  # type: ignore
 
+
+EM_ICON = "✨"
+EM_VERSION = "0.9.1-beta.7"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
@@ -242,26 +245,25 @@ class EasymageConfig:
         RULE: Output ONLY the prompt description. No intro/outro.
     """
 
-    HELP_TEXT = """
-### 🪄 Easymage Manual
-**Advanced Generation Filter**
-
-Easymage allows granular control over image generation directly from the chat.
-
-**Usage Syntax:**
-`img:[cmd] [flags] prompt --no negative_prompt`
-
-**Subcommands:**
-- `img`: Standard generation (Text + Vision Audit).
-- `img:p`: Prompt Enhancer only (No generation).
-- `img:r`: Random "I'm Feeling Lucky" mode.
-- `img ?`: Show this help menu (or just type `img`).
-
-**Examples:**
-- `img A cat in space` (Default)
-- `img:r ar=16:9 --no text` (Random Wallpaper)
-- `img` (Open Manual)
-    """
+    HELP_TEXT = (
+        "## ✨ Easymage\n\n"
+        "v{version} ([Github](https://github.com/annibale-x/Easymage), [Open WebUI](https://openwebui.com/posts/easymage_ai_image_generation_trigger_prompt_enhanc_7f9b447c))\n\n"
+        "Professional-grade filter for unified image workflows.\n"
+        "- Activation: Prepend `img ` to your prompt.\n"
+        "- Dispatcher: Unlocks `seed`, `style`, `quality`, `distilled CFG` and more.\n"
+        "- Connectivity: Supports **Cloud** (Gemini, OpenAI) & **Local** (Forge, ComfyUI).\n"
+        "- Tools: Multilingual engineering & technical analysis.\n\n"
+        "**Usage Syntax:**\n"
+        "`img[:cmd] [flags] prompt --no negative_prompt`\n\n"
+        "**Subcommands:**\n"
+        "- `img`: Show this help menu.\n"
+        "- `img:p`: Prompt Enhancer only (No generation).\n"
+        "- `img:r`: Random \"I'm Feeling Lucky\" mode.\n\n"
+        "**Examples:**\n"
+        "- `img A cat in space` (Default)\n"
+        "- `img:r ar=16:9 --no text` (Random Wallpaper)\n"
+        "- `img sd=42 sz=512 neon, rain -- Batman chased by police --no cars` (with seed 42, styles, and negative prompt)"
+    )
 
 
 # --- DATA STRUCTURES ---
@@ -2677,7 +2679,8 @@ class Filter:
         """
         # 1. Main Content (Safe Markdown for the chat body)
         full_help_content = (
-            self.config.HELP_TEXT + "\n\n**Reference Tables:**\n[1] [2] [3]"
+            self.config.HELP_TEXT.format(version=EM_VERSION)
+            + "\n\n**Reference Tables:**\n[1] [2] [3] [4]"
         )
         self.st.output_content = full_help_content
 
@@ -2685,21 +2688,22 @@ class Filter:
         # Dynamic generation from open_webui.config maps
         model_lines = [f"• {k} ➔ {v}" for k, v in self.config.MODEL_SHORTCUTS.items()]
 
-        sc_content = f"""
-🤖 MODELS
-{chr(10).join(model_lines)}
-
-⚙️ ENGINES
-• en=o ➔ OpenAI
-• en=g ➔ Gemini
-• en=f ➔ Forge/A1111
-• en=c ➔ ComfyUI
-"""
+        sc_content = (
+            f"🤖 IMG GENERATION MODELS\n"
+            f"{chr(10).join(model_lines)}\n\n"
+            f"⚙️ IMG GENERATION ENGINES\n"
+            f"• en=o ➔ OpenAI\n"
+            f"• en=g ➔ Gemini\n"
+            f"• en=f ➔ Forge/A1111\n"
+            f"• en=c ➔ ComfyUI"
+        )
+        
         await self.em.emit_citation("⚡ SHORTCUTS", sc_content.strip(), "1", "help-1")
 
         # 3. PARAMETERS (Flags)
         # Simple list with examples
         p_lines = [
+            "⚙️ PARAMETERS",
             "• sz   ➔ Size (sz=1024 or 512x768)",
             "• ar   ➔ Aspect Ratio (ar=16:9)",
             "• stp  ➔ Steps (stp=30)",
@@ -2708,9 +2712,11 @@ class Filter:
             "• smp  ➔ Sampler (smp=euler)",
             "• sch  ➔ Scheduler (sch=karras)",
             "• auth ➔ Auth Key (auth=sk-...)",
-            "• +h   ➔ Enable High-Res Fix",
-            "• +p   ➔ Force Prompt Enhance",
-            "• +a   ➔ Force Vision Audit",
+            "\n🚩 FLAGS",
+            "• [+/-]a   ➔ Enable/disable Vision Audit",
+            "• [+/-]p   ➔ Enable/disable Prompt Enhance",
+            "• [+/-]h   ➔ Enable/disable High-Res Fix",
+            "• [+/-]d   ➔ Enable/disable Debug mode",
         ]
         await self.em.emit_citation("🎛️ PARAMETERS", "\n".join(p_lines), "2", "help-2")
 
@@ -2719,13 +2725,36 @@ class Filter:
         smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.SAMPLER_MAP.items()]
         sch_lines = [f"• {k} ➔ {v}" for k, v in self.config.SCHEDULER_MAP.items()]
 
-        adv_content = f"""
-SAMPLERS (smp=...)
-{chr(10).join(smp_lines)}
+        adv_content = (
+            f"\n\n"
+            f"Please note ➔ These samplers and schedulers are exclusively compatible\n"
+            f"with Automatic1111 (Forge) and do not apply to cloud-based image generation services.\n\n"
+            f"🎲 SAMPLERS (smp=...)\n"
+            f"{chr(10).join(smp_lines)}\n\n"
+            f"🪜 SCHEDULERS (sch=...)\n"
+            f"{chr(10).join(sch_lines)}"
+        )
 
-SCHEDULERS (sch=...) 
-{chr(10).join(sch_lines)}
-"""
-        await self.em.emit_citation("🛠️ ADVANCED", adv_content.strip(), "3", "help-3")
+        await self.em.emit_citation(
+            "🛠️ AUTOMATIC1111", adv_content.strip(), "3", "help-3"
+        )
+
+        # 5. INFO & BETA (New Addition)
+        info_content = (
+            f"• Version: {EM_VERSION}\n"
+            f"• Author: Hannibal\n"
+            f"• Repo: <https://github.com/annibale-x/Easymage>\n"
+            f"• Post: https://openwebui.com/posts/easymage_ai_image_generation_trigger_prompt_enhanc_7f9b447c\n\n"
+            f"⚠️ PUBLIC BETA\n"
+            f"Easymage orchestrates a fragmented ecosystem. While tested on high-end hardware, compatibility bugs may occur.\n\n"
+            f"🪲 REPORT ISSUES:\n"
+            f"• Parameter/Engine Mappings\n"
+            f"• Runtime Crashes & Hangs\n"
+            f"• Environment Conflicts\n\n"
+            f"Help us harden the logic by opening an issue on GitHub."
+        )
+
+        await self.em.emit_citation("ℹ️ INFO", info_content.strip(), "4", "help-4")
+
 
         self.st.executed = True
