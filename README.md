@@ -1,16 +1,16 @@
 
-# 🚀 Easymage 0.9.1-beta.9: Multilingual Prompt Enhancer & Vision QC
+# ✨ Easymage 0.9.2-beta.1: Multilingual Prompt Enhancer & Vision QC
 
 Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
-This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` and many other that are not natively exposed through the standard Open WebUI interface. Version 0.9.1 introduces a streamlined **Subcommand Architecture** and a **Unified Help System**, creating a seamless bridge between local power-user tools (Forge/ComfyUI) and cloud simplicity (OpenAI/Gemini).
+This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` and many others that are not natively exposed through the standard Open WebUI interface. Version 0.9.1 introduces a streamlined **Subcommand Architecture** and a **Unified Help System**, creating a seamless bridge between local power-user tools (**Forge**, **ComfyUI**) and cloud simplicity (**OpenAI**, **Gemini**).
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Filter](https://img.shields.io/badge/Open%20WebUI-Filter-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.1-beta.9 (vs v0.6.3)
+### 🆕 What's New in v0.9.2-beta.1 (vs v0.6.3)
 
 -   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
 -   **Entropy Engine (Random Mode)**: The new `img:r` command utilizes a sophisticated "Mental Dice Roll" logic within the LLM to generate radically diverse prompts across 6 distinct macro-categories (Nature, Street Photography, Art, Pop Culture, Architecture, Abstract), avoiding common AI clichés like jellyfish or nebulas.
@@ -40,14 +40,15 @@ New to Easymage? Try these commands to see what it can do.
 | **Portrait** | `img ar=9:16 An astronaut in a flower field` | Creates a vertical image (Instagram/Reels format). |
 | **Advanced** | `img sz=1280x720 +h -- A cyberpunk street rain` | Widescreen HD image with **High-Res Fix** enabled for extra detail. |
 | **Random** | `img:r watercolor, peaceful` | Let the AI decide the subject, using "watercolor" as a style guide. |
-| **Native Lang**| `img Un gatto che beve caffè` | **Write in Italian/French/German!** Easymage translates and optimizes it for the model. |
+| **Native Lang**| `img Un gatto che beve caffè` | **Write in any language!** Easymage translates and optimizes it for the model. |
 
 ---
 
 ### ✨ Key Features
 
-*   **🌍 Multilingual Native**: You don't need to speak English to get professional results. Write your prompt in **Italian, Spanish, French, or German**. Easymage detects the language, translates it, and expands it into technical English optimized for the specific generation model.
-*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for `Forge (A1111)`, `OpenAI (DALL-E-3 / DALL-E-2)`, and the full `Google Ecosystem (Gemini 1.5/2.0/3 Flash/Pro & Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
+*   **🌍 Multilingual Native**: You don't need to speak English to get professional results. Write your prompt in **any language**. Easymage detects the language, translates it, and expands it into technical English optimized for the specific generation model.
+*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for Forge, `OpenAI (DALL-E-3 / DALL-E-2)`, and the full `Google Ecosystem (Gemini 1.5/2.0/3 Flash/Pro & Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
+    > **📝 Compatibility Note**: Throughout this documentation, we use **"Forge"** to refer to local Stable Diffusion backends. Easymage is fully compatible with both **WebUI Forge** and the classic **Automatic1111 SD-WebUI**, as they share the same API structure.
 *   **VRAM Auto-Optimization**: Automatically manages your GPU memory. Before generating an image, Easymage checks your Ollama server and unloads unused models to ensure Forge or ComfyUI have enough VRAM to operate without crashing.
 *   **Zero-Latency Dispatch**: Uses a persistent connection pool to communicate with backends. This reduces the time-to-first-token and image generation start time by eliminating repetitive network handshakes.
 *   **Selective Negation Strategy**: A smart logic core that determines how to handle negative prompts. It automatically decides whether to use native API fields (for Gemini or Forge with Hires Fix) or to "inject" the negation into the LLM-enhanced description (for OpenAI and ComfyUI), ensuring perfect visual results.
@@ -77,7 +78,7 @@ Easymage is activated by prepending a specific trigger command to your message. 
 #### Subcommand Architecture
 *   `img [prompt]`: **Standard Generation**. Triggers the full pipeline: Prompt Enhancement → Image Generation → Vision Audit.
 *   `img:p [prompt]`: **Prompt Only Mode**. Executes language detection and prompt enhancement logic but stops *before* generating the image. Useful for iterating on prompt engineering without burning compute credits or time.
-*   `img:r [styles]`: **Random / "I'm Feeling Lucky" Mode**. The LLM acts as an "Engine of Total Entropy," rolling virtual dice to select a subject and style from diverse categories (Nature, Sci-Fi, Art, etc.). Any text you provide is treated as a **Style Constraint**, not a subject.
+*   `img:r [styles]`: **Random / "I'm Feeling Lucky" Mode**. The LLM acts as an "Engine of Total Entropy," rolling virtual dice to select a subject and style from diverse categories (Nature, Street Photography, Art, Pop Culture, Architecture, Abstract). Any text you provide is treated as a **Style Constraint**, not a subject.
 *   `img ?`: **Manual Mode**. Displays the help menu, shortcuts, and parameter tables directly in the chat. Typing just `img` (with no prompt) also triggers this mode.
 
 #### Command Structure
@@ -133,17 +134,17 @@ These parameters allow you to override backend settings directly from the chat.
 | `mdl` | `mdl=d3` | **M**o**d**e**l**. Selects a specific checkpoint or API model version. | All |
 | `sz` | `sz=800` | **S**i**z**e. Accepts `WxH` or a single value `N` (auto-converted to square `NxN`). Dimensions are then normalized based on engine constraints and the `ar` parameter.| All |
 | `ar` | `ar=16:9` | **A**spect **R**atio. Automatically calculates size based on ratio. | All |
-| `stp` | `stp=25` | **St**e**p**s. Number of sampling iterations. | A1111 / Forge |
-| `sd` | `sd=42` | **S**ee**d**. Numeric value for reproducible generations. | A1111, Gemini |
-| `cs` | `cs=7.0` | **C**FG **S**cale. Classifier-Free Guidance intensity. | A1111, Comfy |
-| `dcs` | `dcs=3.5` | **D**istilled **C**FG **S**cale. Specialized for Flux/SD3 models. | A1111 / Forge |
+| `stp` | `stp=25` | **St**e**p**s. Number of sampling iterations. | Forge / A1111 |
+| `sd` | `sd=42` | **S**ee**d**. Numeric value for reproducible generations. | Forge / A1111, Gemini |
+| `cs` | `cs=7.0` | **C**FG **S**cale. Classifier-Free Guidance intensity. | Forge, Comfy |
+| `dcs` | `dcs=3.5` | **D**istilled **C**FG **S**cale. Specialized for Flux/SD3 models. | Forge / A1111 |
 | `stl` | `stl=v` | **St**y**l**e. Choose between `v` (vivid) or `n` (natural). | OpenAI |
-| `smp` | `smp=d2s` | **S**a**m**p**ler**. Selects the sampling algorithm. | A1111 / Forge |
-| `sch` | `sch=k` | **Sch**eduler. Selects the noise schedule type. | A1111 / Forge |
-| `hr` | `hr=2.0` | **H**igh-**R**es Scale. Enables Hires Fix and sets the multiplier. | A1111 / Forge |
-| `hru` | `hru=Latent` | **H**igh-**R**es **U**pscaler. Specifies the upscaling model. | A1111 / Forge |
-| `hdcs` | `hdcs=3.5` | **H**ires **D**istilled **C**FG. Distilled scale during the HR pass. | A1111 / Forge |
-| `dns` | `dns=0.45` | **D**e**n**oi**s**ing Strength. Intensity of the HR fix pass. | A1111 / Forge |
+| `smp` | `smp=d2s` | **S**a**m**p**ler**. Selects the sampling algorithm. | Forge / A1111 |
+| `sch` | `sch=k` | **Sch**eduler. Selects the noise schedule type. | Forge / A1111 |
+| `hr` | `hr=2.0` | **H**igh-**R**es Scale. Enables Hires Fix and sets the multiplier. | Forge / A1111 |
+| `hru` | `hru=Latent` | **H**igh-**R**es **U**pscaler. Specifies the upscaling model. | Forge / A1111 |
+| `hdcs` | `hdcs=3.5` | **H**ires **D**istilled **C**FG. Distilled scale during the HR pass. | Forge / A1111 |
+| `dns` | `dns=0.45` | **D**e**n**oi**s**ing Strength. Intensity of the HR fix pass. | Forge / A1111 |
 | `auth` | `auth=sk..`| **Auth**entication. Overrides global/valve keys for this request. | All |
 
 #### Command Line Flags (Toggles)
@@ -289,7 +290,7 @@ Easymage acts as a high-level abstraction layer. It converts universal parameter
 <details>
 <summary><strong>➡️ View Full Mapping Tables</strong></summary>
 
-#### 1. Automatic1111 / Forge (Direct HTTPX)
+#### 1. Forge / Automatic1111 (Direct HTTPX)
 *Connection: Sends a direct POST request to `/sdapi/v1/txt2img`.*
 | EasyMage Parameter | Forge API Field | Technical Logic |
 | :--- | :--- | :--- |

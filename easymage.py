@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.9
+version: 0.9.2-beta.1
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.models.users import UserModel  # type: ignore
 
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.1-beta.9"
+EM_VERSION = "0.9.2-beta.1"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
@@ -249,6 +249,59 @@ class EasymageConfig:
         {style_instruction}
         RULE: Output ONLY the prompt description. No intro/outro.
     """
+
+    # HELP TEXT TEMPLATES
+    HELP_SHORTCUTS = (
+        "🤖 IMG GENERATION MODELS\n"
+        "{models}\n\n"
+        "⚙️ IMG GENERATION ENGINES\n"
+        "• en=o ➔ OpenAI\n"
+        "• en=g ➔ Gemini\n"
+        "• en=f ➔ Forge / A1111\n"
+        "• en=c ➔ ComfyUI"
+    )
+
+
+    HELP_PARAMS = (
+        "⚙️ PARAMETERS\n"
+        "• sz   ➔ Size (sz=1024 or 512x768)\n"
+        "• ar   ➔ Aspect Ratio (ar=16:9)\n"
+        "• stp  ➔ Steps (stp=30)\n"
+        "• cfg  ➔ Guidance Scale (cfg=7.0)\n"
+        "• sd   ➔ Seed (sd=42)\n"
+        "• smp  ➔ Sampler (smp=euler)\n"
+        "• sch  ➔ Scheduler (sch=karras)\n"
+        "• auth ➔ Auth Key (auth=sk-...)\n\n"
+        "🚩 FLAGS\n"
+        "• [+/-]a   ➔ Enable/disable Vision Audit\n"
+        "• [+/-]p   ➔ Enable/disable Prompt Enhance\n"
+        "• [+/-]h   ➔ Enable/disable High-Res Fix\n"
+        "• [+/-]d   ➔ Enable/disable Debug mode"
+    )
+
+    HELP_ADVANCED = (
+        "\n\n"
+        "Please note ➔ These samplers and schedulers are exclusively compatible\n"
+        "with Forge / Automatic1111 and do not apply to cloud-based image generation services.\n\n"
+        "🎲 SAMPLERS (smp=...)\n"
+        "{samplers}\n\n"
+        "🪜 SCHEDULERS (sch=...)\n"
+        "{schedulers}"
+    )
+
+    HELP_INFO = (
+        "• Version: {version}\n"
+        "• Author: Hannibal\n"
+        "• Repo: <https://github.com/annibale-x/Easymage>\n"
+        "• Post: https://openwebui.com/posts/easymage_ai_image_generation_trigger_prompt_enhanc_7f9b447c\n\n"
+        "⚠️ PUBLIC BETA\n"
+        "Easymage orchestrates a fragmented ecosystem. While tested on high-end hardware, compatibility bugs may occur.\n\n"
+        "🪲 REPORT ISSUES:\n"
+        "• Parameter/Engine Mappings\n"
+        "• Runtime Crashes & Hangs\n"
+        "• Environment Conflicts\n\n"
+        "Help us harden the logic by opening an issue on GitHub."
+    )
 
     HELP_TEXT = (
         "## ✨ Easymage\n\n"
@@ -2691,8 +2744,7 @@ class Filter:
 
     async def _handle_help(self):
         """
-        Generates Help/Manual content using simple bullet points and arrows
-        to ensure maximum compatibility with Open WebUI modals.
+        Generates Help/Manual content using centralized templates from EasymageConfig.
         """
         # 1. Main Content (Safe Markdown for the chat body)
         full_help_content = (
@@ -2702,76 +2754,37 @@ class Filter:
         self.st.output_content = full_help_content
 
         # 2. SHORTCUTS (Models & Engines)
-        # Dynamic generation from open_webui.config maps
         model_lines = [f"• {k} ➔ {v}" for k, v in self.config.MODEL_SHORTCUTS.items()]
-
-        sc_content = (
-            f"🤖 IMG GENERATION MODELS\n"
-            f"{chr(10).join(model_lines)}\n\n"
-            f"⚙️ IMG GENERATION ENGINES\n"
-            f"• en=o ➔ OpenAI\n"
-            f"• en=g ➔ Gemini\n"
-            f"• en=f ➔ Forge/A1111\n"
-            f"• en=c ➔ ComfyUI"
+        
+        # Inject models into the template
+        sc_content = self.config.HELP_SHORTCUTS.format(
+            models=chr(10).join(model_lines)
         )
 
         await self.em.emit_citation("⚡ SHORTCUTS", sc_content.strip(), "1", "help-1")
 
         # 3. PARAMETERS (Flags)
-        # Simple list with examples
-        p_lines = [
-            "⚙️ PARAMETERS",
-            "• sz   ➔ Size (sz=1024 or 512x768)",
-            "• ar   ➔ Aspect Ratio (ar=16:9)",
-            "• stp  ➔ Steps (stp=30)",
-            "• cfg  ➔ Guidance Scale (cfg=7.0)",
-            "• sd   ➔ Seed (sd=42)",
-            "• smp  ➔ Sampler (smp=euler)",
-            "• sch  ➔ Scheduler (sch=karras)",
-            "• auth ➔ Auth Key (auth=sk-...)",
-            "\n🚩 FLAGS",
-            "• [+/-]a   ➔ Enable/disable Vision Audit",
-            "• [+/-]p   ➔ Enable/disable Prompt Enhance",
-            "• [+/-]h   ➔ Enable/disable High-Res Fix",
-            "• [+/-]d   ➔ Enable/disable Debug mode",
-        ]
-        await self.em.emit_citation("🎛️ PARAMETERS", "\n".join(p_lines), "2", "help-2")
+        # Directly use the static template
+        await self.em.emit_citation("🎛️ PARAMETERS", self.config.HELP_PARAMS.strip(), "2", "help-2")
 
         # 4. ADVANCED (Samplers/Schedulers)
-        # Mapping codes to full names
         smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.FORGE_SAMPLER_MAP.items()]
         sch_lines = [f"• {k} ➔ {v}" for k, v in self.config.FORGE_SCHEDULER_MAP.items()]
 
-        adv_content = (
-            f"\n\n"
-            f"Please note ➔ These samplers and schedulers are exclusively compatible\n"
-            f"with Automatic1111 (Forge) and do not apply to cloud-based image generation services.\n\n"
-            f"🎲 SAMPLERS (smp=...)\n"
-            f"{chr(10).join(smp_lines)}\n\n"
-            f"🪜 SCHEDULERS (sch=...)\n"
-            f"{chr(10).join(sch_lines)}"
+        # Inject dynamic lists into the template
+        adv_content = self.config.HELP_ADVANCED.format(
+            samplers=chr(10).join(smp_lines),
+            schedulers=chr(10).join(sch_lines)
         )
 
         await self.em.emit_citation(
-            "🛠️ AUTOMATIC1111", adv_content.strip(), "3", "help-3"
+            "❗ FORGE", adv_content.strip(), "3", "help-3"
         )
 
-        # 5. INFO & BETA (New Addition)
-        info_content = (
-            f"• Version: {EM_VERSION}\n"
-            f"• Author: Hannibal\n"
-            f"• Repo: <https://github.com/annibale-x/Easymage>\n"
-            f"• Post: https://openwebui.com/posts/easymage_ai_image_generation_trigger_prompt_enhanc_7f9b447c\n\n"
-            f"⚠️ PUBLIC BETA\n"
-            f"Easymage orchestrates a fragmented ecosystem. While tested on high-end hardware, compatibility bugs may occur.\n\n"
-            f"🪲 REPORT ISSUES:\n"
-            f"• Parameter/Engine Mappings\n"
-            f"• Runtime Crashes & Hangs\n"
-            f"• Environment Conflicts\n\n"
-            f"Help us harden the logic by opening an issue on GitHub."
-        )
+        # 5. INFO & BETA
+        # Inject version into the template
+        info_content = self.config.HELP_INFO.format(version=EM_VERSION)
 
         await self.em.emit_citation("ℹ️ INFO", info_content.strip(), "4", "help-4")
-
 
         self.st.executed = True
