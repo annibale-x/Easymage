@@ -13,7 +13,7 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ### 🆕 What's New in v0.9.2-beta.2 (vs v0.6.3)
 
 -   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
--   **Entropy Engine (Random Mode)**: The new `img:r` command utilizes a sophisticated "Mental Dice Roll" logic within the LLM to generate radically diverse prompts across 6 distinct macro-categories (Nature, Street Photography, Art, Pop Culture, Architecture, Abstract), avoiding common AI clichés like jellyfish or nebulas.
+-   **Entropy Engine (Random Mode)**: The new `img:r` command uses a **Deterministic  Double-Dice System** executed in Python code (not LLM hallucinations) to ensure true diversity.
 -   **Integrated Help System**: Typing `img ?` or simply `img` (with no prompt) now injects a visual manual directly into the chat. It creates interactive citation badges for models, parameters, and engine codes, eliminating the need to memorize syntax.
 -   **Expanded High-Res Parameters**: Added granular control for Forge upscaling via CLI, including `hr` (scale), `hru` (upscaler model), `dns` (denoising strength), and `hdcs` (distilled CFG).
 -   **High-Performance Connection Pooling**: Implements a global, persistent HTTP client for Ollama, OpenAI, and Forge. Eliminates handshake latency and keeps connections alive for instant response times.
@@ -355,37 +355,60 @@ Easymage handles dimensions dynamically to satisfy different engine requirements
 3. **AR Overriding**: If the `ar` parameter is present, it takes precedence in calculating the final height relative to the requested width.
 
 ---
-## Configuration & Diagnostics
 
-### 🔧 Filter Configuration (Valves)
+## 🔧 Configuration & Valves
 
-Valves allow you to set the "factory defaults" for Easymage. You can find these settings in your Open WebUI profile under `Settings > Filters > Easymage`.
+Easymage uses a hierarchical configuration system. Settings are applied in the following order of precedence (highest priority first):
+1.  **CLI Command** (e.g., `img sz=1024`) -> *Overrides everything for a single request.*
+2.  **User Valves** (Personal Settings) -> *Overrides Admin defaults.*
+3.  **Admin Valves** (System Settings) -> *Overrides Open WebUI global variables.*
 
-**Note**: Any command sent via CLI (e.g., `sz=512x512`) will temporarily override these global settings for that specific message.
+### 1. User Valves (Personal Preferences)
+These settings are specific to **your account**. You can access them via the **Controls** menu (or `Settings > Filters > Easymage` depending on your OWUI version).
 
 | Valve | Default | Description |
 | :--- | :---: | :--- |
-| **Enhanced Prompt** | `True` | Enables the LLM Prompt Engineer to expand your input by default. |
-| **Quality Audit** | `True` | Enables the post-generation Vision analysis and scoring. |
-| **Strict Audit** | `False` | Enables "Ruthless Mode" for the audit, being much more severe with technical flaws. |
-| **Persistent Vision Cache**| `False` | Saves the results of the Vision Capability test to disk to speed up subsequent starts. |
-| **Extreme VRAM Cleanup** | `False` | If enabled, unloads ALL models (including the current LLM) before image generation. Default is False (unloads only other models). |
-| **Debug** | `False` | Prints the full internal state JSON and diagnostic logs to the Docker/Server console. |
-| **Model** | `None` | Forces a specific model/checkpoint (e.g., `flux1-dev.safetensors`) for all generations. |
-| **Generation Timeout** | `120` | Maximum time (seconds) to wait for the image engine to respond. |
-| **Steps** | `20` | Default number of sampling steps. |
-| **Size** | `1024x1024` | Default image dimensions. |
-| **Seed** | `-1` | Default seed value (`-1` for random). |
-| **CFG Scale** | `1.0` | Default Classifier-Free Guidance scale. |
-| **Distilled CFG Scale** | `3.5` | Default Distilled CFG for Flux/SD3 models. |
-| **Sampler Name** | `Euler` | Default sampling algorithm. |
-| **Scheduler** | `Simple` | Default noise schedule type. |
-| **Enable HR** | `False` | Enables High-Res Fix (Forge) or HD Quality (OpenAI) by default. |
-| **HR Scale** | `2.0` | Default multiplier for the High-Res Fix pass. |
-| **HR Upscaler** | `Latent` | Default model used for the Hires upscale pass. |
-| **HR Distilled CFG** | `3.5` | Default Distilled CFG used during the Hires pass. |
-| **Denoising Strength** | `0.45` | Default intensity of the High-Res Fix pass. |
+| **🔐 Authentication** | | |
+| `openai_auth` | `""` | Your personal OpenAI API Key. Overrides the system default. |
+| `gemini_auth` | `""` | Your personal Google Gemini API Key. Overrides the system default. |
+| `automatic1111_auth` | `""` | Your personal Forge credentials (`user:password`). |
+| **🎨 Workflow** | | |
+| `enhanced_prompt` | `True` | If enabled, the LLM rewrites and improves your prompt before generation. |
+| `quality_audit` | `True` | Enables the Vision LLM to critique the generated image and assign a score. |
+| `strict_audit` | `False` | Enables "Ruthless Mode" for the audit (penalizes hallucinations severely). |
+| `debug` | `False` | Prints the full internal state JSON and API payloads to the server console. |
+| **⚙️ Generation Parameters** | | |
+| `model` | `None` | Forces a specific checkpoint (e.g., `flux1-dev.safetensors`) for all requests. |
+| `size` | `1024x1024` | Default image resolution (`WxH`). |
+| `aspect_ratio` | `1:1` | Default aspect ratio (e.g., `16:9`, `4:3`). Overrides `size` calculation if set. |
+| `steps` | `20` | Number of sampling steps (Forge / A1111 only). |
+| `seed` | `-1` | Default seed (`-1` = Random). |
+| `cfg_scale` | `1.0` | Classifier-Free Guidance scale. |
+| `distilled_cfg_scale` | `3.5` | Specific CFG for distilled models like Flux/SD3. |
+| **🛠️ Forge / A1111 Specifics** | | |
+| `sampler_name` | `Euler` | The sampling algorithm (e.g., `DPM++ 2M SDE`). |
+| `scheduler` | `Simple` | The noise schedule type (e.g., `Karras`, `SGM Uniform`). |
+| `enable_hr` | `False` | Enables High-Res Fix (Forge) or HD Quality (OpenAI). |
+| `hr_scale` | `2.0` | Upscale multiplier (e.g., 1.5x, 2.0x). |
+| `hr_upscaler` | `Latent` | The algorithm used for the upscaling pass. |
+| `hr_distilled_cfg` | `3.5` | CFG scale used specifically during the Hires pass. |
+| `denoising_strength` | `0.45` | How much the upscaler can modify the original image (0.0 - 1.0). |
 
+---
+
+### 2. Admin Valves (System Defaults)
+These settings are managed by the **Administrator** and apply to all users unless overridden. They control the infrastructure and connection behavior.
+
+| Valve | Default | Description |
+| :--- | :---: | :--- |
+| `easy_cloud_mode` | `True` | If `True`, ignores custom/local URLs for OpenAI/Gemini and uses the official public endpoints (`api.openai.com`, etc.). Disable this if you use a reverse proxy. |
+| `generation_timeout` | `120` | Maximum time (seconds) to wait for an API response before failing. |
+| `extreme_vram_cleanup` | `False` | **Memory Safety:** If `True`, unloads *everything* (including the active Chat LLM) before generation. If `False`, only unloads *other* idle models. |
+| `persistent_vision_cache` | `False` | If `True`, saves the "Vision Capability" test results to a JSON file to speed up server restarts. |
+| **🔑 Global Auth Defaults** | | |
+| `openai_auth` | `""` | Global fallback API Key for OpenAI. |
+| `gemini_auth` | `""` | Global fallback API Key for Gemini. |
+| `automatic1111_auth` | `""` | Global fallback credentials for Forge (`user:password`). |
 ---
 
 ### 📌 Output, Citations & Performance
@@ -457,4 +480,4 @@ We actively encourage feedback and issue reports regarding:
 Help us harden the orchestration logic by reporting any anomaly you encounter.
 
 
-If you encounter bugs or have feature requests, please open an issue on the [GitHub Repository](https://github.com/annibale-x/Easymage) or contact the author through the Open WebUI community portal.
+If you encounter bugs or have feature requests, please open an issue on the [GitHub Repository](https://github.com/annibale-x/Easymage) or contact the author through the Open WebUI community portal./).
