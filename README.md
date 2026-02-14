@@ -1,46 +1,51 @@
-# 🚀 Easymage v0.8.15: Easy Image Generator & Prompt Engineer
 
-## Project Identity & Smart Pipeline
+## 🚀 Easymage 0.9.0a1: Easy Image Generator & Prompt Engineer
 
 Easymage is a professional-grade filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img ` or `imgx ` to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
-This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.8.15 introduces a high-fidelity **Selective Negation Strategy**, ensuring that your negative requirements are executed with precision regardless of the chosen backend.
+This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-specific parameters like `seed`, `style`, `quality`, and `distilled CFG` that are not natively exposed through the standard Open WebUI interface. Version 0.9.1a1 introduces critical optimizations for high-end hardware and low-VRAM environments, ensuring stability and speed across all setups.
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/annibale-x/Easymage)
 ![Open WebUI Filter](https://img.shields.io/badge/Open%20WebUI-Filter-blue?style=flat&logo=openai)
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
-### 🆕 What's New in v0.8.15 (vs v0.6.3)
+### 🆕 What's New in v0.9.0-alpha.1 (vs v0.6.3)
 
--   **Engine-Level Determinism**: Custom dispatcher for Ollama/OpenAI that bypasses OWUI's native completion bugs, ensuring 1:1 seed reproducibility.
--   **Native Direct Routing**: Bypasses standard internal APIs using direct HTTPX connections for A1111, OpenAI, and Gemini.
+-   **High-Performance Connection Pooling**: Implements a global, persistent HTTP client for Ollama, OpenAI, and Forge. Eliminates handshake latency and keeps connections alive for instant response times.
+-   **Direct API Dispatch**: Completely bypasses Open WebUI's internal chat completion logic. Requests are sent directly to the backend (Ollama/OpenAI), preventing history pollution and database bloat.
+-   **Environment-Agnostic VRAM Management**:
+    -   **Standard Cleanup**: Automatically unloads unused models from VRAM before starting image generation, preventing Out-Of-Memory errors on consumer GPUs.
+    -   **Extreme Cleanup Valve**: Optional setting to unload *everything* (including the active LLM) for maximum VRAM availability during generation.
+-   **Context & Session Stability**: Optimized payload logic prevents unnecessary model reloading in Ollama, solving "VRAM thrashing" issues during complex multi-step workflows.
+-   **Engine-Level Determinism**: Custom dispatcher for Ollama/OpenAI ensures 1:1 seed reproducibility by bypassing middleware interference.
 -   **Selective Negation Strategy**: Smart logic chooses between native API or LLM integration based on engine support and Hires Fix status.
 -   **Universal CLI Syntax**: Full control via `sz=`, `stp=`, `sd=`, `dcs=`, `hdcs=`, and specialized shortcuts.
 -   **IMGX Text Mode**: Extract enhanced prompts as natural text without generating images.
--   **Next-Gen Model Support**: Native parameters for Flux and SD3 (Distilled CFG and Hires Distilled CFG).
 -   **Dual-Layer Negative Prompts**: Automatic fallback to AVOID protocol for limited engines (OpenAI/Comfy).
--   **High-Fidelity Citations**: Detailed tracking of original user styles/negations vs final enhanced prompt.
--   **Advanced High-Res Fix**: Deep integration for Forge and OpenAI HD quality mapping.
--   **Performance Throughput**: Real-time tracking of LLM tokens, generation latency, and Tokens/sec.
--   **Refined Error Interception**: Unified handling for backend timeouts and API failures via Docker logging.
+-   **Refined Error Interception**: Unified handling for backend timeouts and API failures via Docker logging and UI alerts.
 
 ---
 
 ### ✨ Key Features
 
 *   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for `Forge (A1111)`, `OpenAI (DALL-E-3 / DALL-E-2)`, and `Gemini (Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
-*   **Selective Negation Strategy (New)**: A smart logic core that determines how to handle negative prompts. It automatically decides whether to use native API fields (for Gemini or Forge with Hires Fix) or to "inject" the negation into the LLM-enhanced description (for OpenAI and ComfyUI), ensuring perfect visual results.
+*   **VRAM Auto-Optimization**: Automatically manages your GPU memory. Before generating an image, Easymage checks your Ollama server and unloads unused models to ensure Forge or ComfyUI have enough VRAM to operate without crashing.
+*   **Zero-Latency Dispatch**: Uses a persistent connection pool to communicate with backends. This reduces the time-to-first-token and image generation start time by eliminating repetitive network handshakes.
+*   **Selective Negation Strategy**: A smart logic core that determines how to handle negative prompts. It automatically decides whether to use native API fields (for Gemini or Forge with Hires Fix) or to "inject" the negation into the LLM-enhanced description (for OpenAI and ComfyUI), ensuring perfect visual results.
 *   **Automated Prompt Engineering**: Expands minimalist user input into high-fidelity technical prompts. It dynamically incorporates details about lighting, camera angles, textures, environment, and artistic style based on your requirements.
 *   **Vision Quality Audit (QC)**: Provides a real-time technical critique of the generated image using Vision LLMs. It assigns a numerical score (0-100%) and evaluates specific artifacts like noise, grain, melting, and aliasing (jaggies).
 *   **Universal CLI Syntax**: Control every generation aspect with a single syntax (`sz=`, `stp=`, `ar=`, etc.). No more switching between different interfaces or learning complex API structures.
-*   **Deep Performance Analytics**: Every generation tracks precise metrics, including total execution time, image generation latency, and LLM throughput (Tokens per second).
+*   **Performance Analytics**: Every generation tracks precise metrics, including total execution time, image generation latency, and LLM throughput (Tokens per second).
 
 ---
 
 ### 🧠 The Three-Step Pipeline
 
 1.  **Expansion & Optimization**: The system detects the language, identifies your requested styles and exclusions, and uses an LLM to build a professional prompt.
-2.  **Smart Generation**: The request is routed to the chosen engine. If the engine supports native parameters (like Seed or Negative Prompt), Easymage passes them directly via HTTPX; otherwise, it handles the logic through text fallback.
+2.  **Smart Generation (w/ VRAM Handover)**:
+    -   Easymage cleans the VRAM (unloading idle LLMs).
+    -   The request is routed to the chosen engine via direct, optimized HTTPX calls.
+    -   If native parameters are supported, they are passed directly; otherwise, logic fallbacks apply.
 3.  **Visual Verification**: If a Vision-capable model is available, the final image is audited for prompt alignment and technical integrity.
 
 ---
@@ -68,6 +73,33 @@ The universal format is:
 | **Negative Prompt**| `--no people, blur` | Elements to exclude. The `--no ` separator triggers the logic fallback system. |
 
 > 💡 **Smart Parsing**: If you only use technical parameters (like `sz=1024` or `+h`), Easymage automatically identifies the Subject as everything following the last parameter. You only need the `-- ` separator when you want to provide descriptive Styles (e.g., `img sz=1024 cinematic, low-angle -- a giant tree`).
+
+
+Certamente. Ecco una nuova sezione per il README che spiega in dettaglio la logica di priorità con cui vengono applicati i parametri, mantenendo lo stile e la formattazione del documento originale.
+
+####  Configuration Hierarchy & Precedence
+
+Easymage uses an intelligent, three-layer system to determine which settings to apply for each image generation. This tiered approach gives you maximum flexibility, allowing for quick, one-time experiments without altering your preferred defaults. The rule is simple: **more specific settings always override more general ones.**
+
+Here is the order of priority, from highest to lowest:
+
+| Priority | Source | Description |
+| :---: | :--- | :--- |
+| **1 (Highest)** | **Command Line (CLI)** | Parameters typed directly into your chat message (e.g., `sd=123`). These are temporary and last for only one generation. |
+| **2 (Medium)** | **Easymage Valves** | Your personal defaults, configured in `Settings > Filters`. These apply to all your `img` commands unless a CLI parameter is used. |
+| **3 (Lowest)** | **Global OWUI Settings** | The server-wide defaults for image generation, usually configured by an administrator. Easymage uses these as a final fallback. |
+
+#### Practical Example
+
+Let's see how this works for the **`size`** parameter:
+
+1.  **Global Setting**: Your Open WebUI server is configured with a default image size of `1024x1024`.
+2.  **Valve Override**: You go into your Easymage Valves and set the `Size` to `512x512`. From now on, every time you type `img a cat`, the image will be `512x512`.
+3.  **CLI Override**: You want to create a single widescreen image. You type `img sz=1792x1024 a cat`. For this specific request, Easymage will ignore both the Global setting and your Valve, generating a `1792x1024` image.
+
+The next time you type `img a dog`, it will revert to using your Valve setting of `512x512`.
+
+
 
 ---
 
@@ -307,6 +339,7 @@ Valves allow you to set the "factory defaults" for Easymage. You can find these 
 | **Quality Audit** | `True` | Enables the post-generation Vision analysis and scoring. |
 | **Strict Audit** | `False` | Enables "Ruthless Mode" for the audit, being much more severe with technical flaws. |
 | **Persistent Vision Cache**| `False` | Saves the results of the Vision Capability test to disk to speed up subsequent starts. |
+| **Extreme VRAM Cleanup** | `False` | If enabled, unloads ALL models (including the current LLM) before image generation. Default is False (unloads only other models). |
 | **Debug** | `False` | Prints the full internal state JSON and diagnostic logs to the Docker/Server console. |
 | **Model** | `None` | Forces a specific model/checkpoint (e.g., `flux1-dev.safetensors`) for all generations. |
 | **Generation Timeout** | `120` | Maximum time (seconds) to wait for the image engine to respond. |
@@ -378,5 +411,19 @@ Easymage is released under the **MIT License**. Feel free to use, modify, and di
 ---
 
 ### 🤝 Contributing & Support
-If you encounter bugs or have feature requests, please open an issue on the [GitHub Repository](https://github.com/annibale-x/Easymage) or contact the author through the Open WebUI community portal.
 
+**Easymage** is an orchestration layer for a complex and fragmented ecosystem. While developed on high-end hardware, its core mission is universal compatibility and robust control. Given the thousands of possible combinations between LLMs, Image Engines, and UI parameters, this version is a **Public Alpha**.
+
+We actively encourage feedback and issue reports regarding:
+
+-   **Engine Mappings:** Incorrect parameter translations or missing features.
+    
+-   **Runtime Errors:** Crashes, hangs, or unexpected behavior in the Open WebUI pipeline.
+    
+-   **Environment Issues:** Compatibility bugs across different hardware or Docker setups.
+    
+
+Help us harden the orchestration logic by reporting any anomaly you encounter.
+
+
+If you encounter bugs or have feature requests, please open an issue on the [GitHub Repository](https://github.com/annibale-x/Easymage) or contact the author through the Open WebUI community portal.

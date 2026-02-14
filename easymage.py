@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.4
+version: 0.9.1-beta.6
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -205,11 +205,41 @@ class EasymageConfig:
     """
 
     PROMPT_RANDOM_GEN = """
-        ROLE: You are a Creative Director for generative AI art.
-        TASK: Generate a completely random, unique, and highly detailed image description.
-        THEME: Vary wildly between Sci-Fi, Fantasy, Photorealistic, Abstract, Surreal, Cyberpunk, or Classical Art.
+        ROLE: You are an Engine of Total Entropy.
+        TASK: Generate a completely random image description. 
+        
+        STRATEGY: MENTALLY ROLL A D6 TO SELECT A MACRO-CATEGORY:
+        
+        [1] NATURE & GEOGRAPHY:
+           - Landscapes, Wildlife, Weather phenomena, Underwater (realistic), Aerial views.
+           - Style: National Geographic Photography.
+           
+        [2] DAILY LIFE & HUMANITY:
+           - Street photography, Cozy interiors, Candid portraits, Cultural festivals, Busy markets.
+           - Style: 35mm Film, Documentary.
+           
+        [3] ART & ILLUSTRATION:
+           - Oil painting, Watercolor, Ukiyo-e, Charcoal sketch, Vector Art, Pop Art.
+           - Subject: Any, interpreted artistically.
+           
+        [4] POP CULTURE & STYLIZED:
+           - Anime (Ghibli/Cyberpunk), Pixel Art, Claymation, Comic Book, Low Poly 3D.
+           - Subject: Characters, Fantasy scenes.
+           
+        [5] ARCHITECTURE & STRUCTURE:
+           - Brutalism, Gothic cathedrals, Modern skyscrapers, Ancient ruins, Industrial machinery.
+           - Style: Architectural Digest, Blueprint.
+           
+        [6] CONCEPTUAL & ABSTRACT:
+           - Macro photography, Fluid simulations, Geometric patterns, Surreal dreamscapes.
+
+        MANDATORY RULES:
+        - DIVERSITY: Do not stay in one category. Jump wildly between realistic photos and stylized art.
+        - NO CLICHÉS: Avoid Astronauts, Nebulas, Jellyfish, Mushrooms, or generic "war scenes".
+        - SPECIFICITY: Be extremely detailed (e.g., instead of "a bird", say "a wet kingfisher on a mossy branch").
+        
         {style_instruction}
-        RULE: Output ONLY the prompt description. Do not add introductions, quotes or markdown.
+        RULE: Output ONLY the prompt description. No intro/outro.
     """
 
     HELP_TEXT = """
@@ -225,12 +255,12 @@ Easymage allows granular control over image generation directly from the chat.
 - `img`: Standard generation (Text + Vision Audit).
 - `img:p`: Prompt Enhancer only (No generation).
 - `img:r`: Random "I'm Feeling Lucky" mode.
-- `img ?`: Show this help menu.
+- `img ?`: Show this help menu (or just type `img`).
 
 **Examples:**
 - `img A cat in space` (Default)
 - `img:r ar=16:9 --no text` (Random Wallpaper)
-- `img ?` (Open Manual)
+- `img` (Open Manual)
     """
 
 
@@ -1761,7 +1791,7 @@ class Filter:
 
         # --- FAST EXIT: HELP SYSTEM (SILENT MODE) ---
         # Immediate short-circuit if subcommand is '?' or 'help'.
-        # We DO NOT emit anything here to avoid flickering. 
+        # We DO NOT emit anything here to avoid flickering.
         # Visualization is fully deferred to the outlet.
         if self.st.model.subcommand in ["?", "help"]:
             return self._suppress_output(body)
@@ -1947,7 +1977,6 @@ class Filter:
 
         return body
 
-
     async def outlet(
         self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
     ) -> dict:
@@ -1961,7 +1990,7 @@ class Filter:
             # Catch-all for when inlet exited early without creating full state (except help)
             # If st exists but not executed, we check if it was a help command handled in inlet?
             # actually, help is handled here in outlet now.
-            
+
             # Re-check logic: if inlet returned early for help, st exists but executed is False?
             # Wait, if inlet returns early for help, st is created.
             pass
@@ -1969,7 +1998,7 @@ class Filter:
         # Check if the process was actually triggered (avoid generic non-img messages)
         # Note: 'st' might be None if check_input failed.
         if not getattr(self, "st", None) or not self.st.model.trigger:
-             return body
+            return body
 
         if __event_emitter__:
             self.em.emitter = __event_emitter__
@@ -2389,7 +2418,8 @@ class Filter:
         Supports:
         - img:p (Prompt Only)
         - img:r (Random)
-        - img ? (Help)
+        - img ? (Explicit Help)
+        - img   (Implicit Help - No args)
         Returns: (trigger, prompt, subcommand)
         """
 
@@ -2404,21 +2434,33 @@ class Filter:
         last = msgs[-1]["content"]
         # Safe extraction for both string and list (multimodal) content
         txt = last[0].get("text", "") if isinstance(last, list) else str(last)
-        
-        # Robustness: Strip whitespace
+
+        # Robustness: Strip whitespace explicitly
         txt = txt.strip()
 
-        # FIX: Split Regex to handle 'img:p/r' vs 'img ?'
+        # Regex captures trigger and optional explicit subcommands
         # Group 1: Trigger (img)
-        # Group 2: Colon subcommands (p|r) - Operational commands
-        # Group 3: Space subcommands (?|help) - Help commands
-        m = re.match(r"^(img)(?:(?::\s*(p|r))|(?:\s+(\?|help)))?(?:\s|$)", txt, re.IGNORECASE)
+        # Group 2: Colon subcommands (p|r)
+        # Group 3: Space subcommands (?|help)
+        m = re.match(
+            r"^(img)(?:(?::\s*(p|r))|(?:\s+(\?|help)))?(?:\s|$)", txt, re.IGNORECASE
+        )
 
         if m:
             trigger = m.group(1).lower()
-            # Capture subcommand from either group (colon or space based)
+            # Capture explicit subcommand if present
             sub = (m.group(2) or m.group(3) or "").lower() or None
-            return (trigger, txt[m.end() :].strip(), sub)
+
+            # Extract the remaining text (the prompt)
+            raw_p = txt[m.end() :].strip()
+
+            # LOGIC: Implicit Help
+            # If sub is None (standard gen) AND prompt is empty (length 0),
+            # it means the user typed just "img". Convert to Help.
+            if sub is None and len(raw_p) == 0:
+                sub = "?"
+
+            return (trigger, raw_p, sub)
 
         return None
 
@@ -2630,61 +2672,60 @@ class Filter:
 
     async def _handle_help(self):
         """
-        Generates Help/Manual content.
-        Emits citations immediately (events), but buffers text content for the outlet injection.
+        Generates Help/Manual content using simple bullet points and arrows
+        to ensure maximum compatibility with Open WebUI modals.
         """
-        # 1. Prepare Content with Placeholders for Badges
-        # FIX: Adding [1] [2] [3] allows Open WebUI to link citations as badges
-        full_help_content = self.config.HELP_TEXT + "\n\n**Reference Tables:**\n[1] [2] [3]"
-        
-        # Store content in state, do NOT emit message here to avoid flickering.
-        # The outlet will inject this text atomically.
+        # 1. Main Content (Safe Markdown for the chat body)
+        full_help_content = (
+            self.config.HELP_TEXT + "\n\n**Reference Tables:**\n[1] [2] [3]"
+        )
         self.st.output_content = full_help_content
 
-        # 2. Shortcuts & Engines Table
-        shortcuts = "\n".join([f"| `{k}` | {v} |" for k, v in self.config.MODEL_SHORTCUTS.items()])
-        engines = "| `en=o` | OpenAI |\n| `en=g` | Gemini |\n| `en=f` | Forge/A1111 |\n| `en=c` | ComfyUI |"
-        
-        tbl_models = f"""
-| Shortcut | Model / Engine |
-| :--- | :--- |
-{shortcuts}
+        # 2. SHORTCUTS (Models & Engines)
+        # Dynamic generation from open_webui.config maps
+        model_lines = [f"• {k} ➔ {v}" for k, v in self.config.MODEL_SHORTCUTS.items()]
 
-**Engine Codes**
-{engines}
+        sc_content = f"""
+🤖 MODELS
+{chr(10).join(model_lines)}
+
+⚙️ ENGINES
+• en=o ➔ OpenAI
+• en=g ➔ Gemini
+• en=f ➔ Forge/A1111
+• en=c ➔ ComfyUI
 """
-        await self.em.emit_citation("⚡ SHORTCUTS", tbl_models, "1", "help-1")
+        await self.em.emit_citation("⚡ SHORTCUTS", sc_content.strip(), "1", "help-1")
 
-        # 3. Parameters Table
-        tbl_params = """
-| Flag | Description | Example |
-| :--- | :--- | :--- |
-| `sz` | Size (WxH or square) | `sz=1024`, `sz=512x768` |
-| `ar` | Aspect Ratio | `ar=16:9`, `ar=1:1` |
-| `stp` | Steps | `stp=30` |
-| `cfg` | Guidance Scale | `cfg=7.0` |
-| `sd` | Seed | `sd=42` |
-| `smp` | Sampler | `smp=dpm++2m` |
-| `sch` | Scheduler | `sch=karras` |
-| `auth` | Auth Override | `auth=sk-proj-123...` |
-| `+h` | High-Res Fix | `+h` (Enable) |
-| `+p` | Prompt Enhance | `+p` (Force On), `-p` (Off) |
-| `+a` | Audit | `+a` (Force On), `-a` (Off) |
+        # 3. PARAMETERS (Flags)
+        # Simple list with examples
+        p_lines = [
+            "• sz   ➔ Size (sz=1024 or 512x768)",
+            "• ar   ➔ Aspect Ratio (ar=16:9)",
+            "• stp  ➔ Steps (stp=30)",
+            "• cfg  ➔ Guidance Scale (cfg=7.0)",
+            "• sd   ➔ Seed (sd=42)",
+            "• smp  ➔ Sampler (smp=euler)",
+            "• sch  ➔ Scheduler (sch=karras)",
+            "• auth ➔ Auth Key (auth=sk-...)",
+            "• +h   ➔ Enable High-Res Fix",
+            "• +p   ➔ Force Prompt Enhance",
+            "• +a   ➔ Force Vision Audit",
+        ]
+        await self.em.emit_citation("🎛️ PARAMETERS", "\n".join(p_lines), "2", "help-2")
+
+        # 4. ADVANCED (Samplers/Schedulers)
+        # Mapping codes to full names
+        smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.SAMPLER_MAP.items()]
+        sch_lines = [f"• {k} ➔ {v}" for k, v in self.config.SCHEDULER_MAP.items()]
+
+        adv_content = f"""
+SAMPLERS (smp=...)
+{chr(10).join(smp_lines)}
+
+SCHEDULERS (sch=...) 
+{chr(10).join(sch_lines)}
 """
-        await self.em.emit_citation("🎛️ PARAMETERS", tbl_params, "2", "help-2")
+        await self.em.emit_citation("🛠️ ADVANCED", adv_content.strip(), "3", "help-3")
 
-        # 4. Samplers & Schedulers (Forge/Comfy)
-        smp_list = ", ".join([f"`{k}`" for k in self.config.SAMPLER_MAP.keys()])
-        sch_list = ", ".join([f"`{k}`" for k in self.config.SCHEDULER_MAP.keys()])
-        
-        tbl_adv = f"""
-**Supported Samplers (smp=...)**
-{smp_list}
-
-**Supported Schedulers (sch=...)**
-{sch_list}
-"""
-        await self.em.emit_citation("🛠️ ADVANCED", tbl_adv, "3", "help-3")
-        
-        # Mark as executed
         self.st.executed = True
