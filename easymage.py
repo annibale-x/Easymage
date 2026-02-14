@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.1-beta.8
+version: 0.9.1-beta.9
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.models.users import UserModel  # type: ignore
 
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.1-beta.8"
+EM_VERSION = "0.9.1-beta.9"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
@@ -1348,17 +1348,40 @@ class PromptParser:
 
             try:
                 if k == "en":
-                    m_st["engine"] = {
+                    # Extended mapping for Forge/Automatic1111 confusion
+                    # Maps shortcuts to internal constants
+                    engine_map = {
                         "a": self.config.Engines.FORGE,
+                        "f": self.config.Engines.FORGE,
+                        "forge": self.config.Engines.FORGE,
+                        "automatic1111": self.config.Engines.FORGE,
                         "o": self.config.Engines.OPENAI,
+                        "openai": self.config.Engines.OPENAI,
                         "g": self.config.Engines.GEMINI,
+                        "gemini": self.config.Engines.GEMINI,
                         "c": self.config.Engines.COMFY,
-                    }.get(v.lower(), v.lower())
+                        "comfyui": self.config.Engines.COMFY,
+                    }
 
-                    m_st["_explicit_engine"] = True
-                    # Also mark explicit flags as overridden
-                    if "engine" not in m_st["overridden_keys"]:
-                        m_st["overridden_keys"].append("engine")
+                    # Resolve the alias
+                    raw_val = v.lower()
+                    resolved = engine_map.get(raw_val)
+
+                    # If not a known alias, checks if it is already a valid internal engine name
+                    if not resolved and raw_val in engine_map.values():
+                        resolved = raw_val
+
+                    if resolved:
+                        m_st["engine"] = resolved
+                        m_st["_explicit_engine"] = True
+                        # Also mark explicit flags as overridden
+                        if "engine" not in m_st["overridden_keys"]:
+                            m_st["overridden_keys"].append("engine")
+                    else:
+                        # STRICT VALIDATION: If engine is unknown, register a clear error immediately.
+                        self.ctx.st.validation_errors.append(
+                            f"Unknown Engine code: '{v}'.\n\nAvailable:\n    → f / forge /a / automatic1111\n    → o / openai\n    → g / gemini\n    → c / comfy"
+                        )
 
                 elif k in ["mdl", "mod", "m"]:
                     v_low = v.lower()

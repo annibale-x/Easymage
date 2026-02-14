@@ -1,5 +1,5 @@
 
-# 🚀 Easymage 0.9.1-beta.8: Multilingual Prompt Enhancer & Vision QC
+# 🚀 Easymage 0.9.1-beta.9: Multilingual Prompt Enhancer & Vision QC
 
 Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
@@ -10,7 +10,7 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.1-beta.8 (vs v0.6.3)
+### 🆕 What's New in v0.9.1-beta.9 (vs v0.6.3)
 
 -   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
 -   **Entropy Engine (Random Mode)**: The new `img:r` command utilizes a sophisticated "Mental Dice Roll" logic within the LLM to generate radically diverse prompts across 6 distinct macro-categories (Nature, Street Photography, Art, Pop Culture, Architecture, Abstract), avoiding common AI clichés like jellyfish or nebulas.
@@ -167,7 +167,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 
 | Shortcut | Engine Name | Backend API |
 | :--- | :--- | :--- |
-| `a` | `automatic1111` | SD Forge / A1111 (Direct HTTPX) |
+| `f` / `a` | `forge` / `automatic1111` | SD Forge / A1111 (Direct HTTPX) |
 | `o` | `openai` | DALL-E 3 (Direct HTTPX) |
 | `g` | `gemini` | Imagen 3 (Direct HTTPX) |
 | `c` | `comfyui` | ComfyUI (Open WebUI API) |
