@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.2-beta.1
+version: 0.9.2-beta.2
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.models.users import UserModel  # type: ignore
 
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.2-beta.1"
+EM_VERSION = "0.9.2-beta.2"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---
@@ -35,6 +35,7 @@ HTTP_CLIENT = httpx.AsyncClient()
 
 
 # --- CONFIGURATION & MAPS ---
+
 
 class EasymageConfig:
     """
@@ -115,17 +116,14 @@ class EasymageConfig:
         # OpenAI
         "d3": "dall-e-3",
         "d2": "dall-e-2",
-        "g4o": "gpt-4o",             
-        "g4om": "gpt-4o-mini",       
-
+        "g4o": "gpt-4o",
+        "g4om": "gpt-4o-mini",
         # Google Imagen Series (Endpoint: :predict)
-        "i4": "imagen-4.0-generate-001",           # CURRENT STANDARD
-        "veo": "veo-3.0-generate-preview",         # Veo 3 (Frame Gen)
-
+        "i4": "imagen-4.0-generate-001",  # CURRENT STANDARD
+        "veo": "veo-3.0-generate-preview",  # Veo 3 (Frame Gen)
         # Google Nano Banana / Gemini (Endpoint: :generateContent)
-        "g2.5f": "gemini-2.5-flash-image",          # Nano Banana (Fast)
-        "g3p": "gemini-3-pro-image-preview",        # Nano Banana Pro (High Quality)
-
+        "g2.5f": "gemini-2.5-flash-image",  # Nano Banana (Fast)
+        "g3p": "gemini-3-pro-image-preview",  # Nano Banana Pro (High Quality)
         # Local / Forge
         "flux": "flux1-dev.safetensors",
         "sdxl": "sd_xl_base_1.0.safetensors",
@@ -136,15 +134,13 @@ class EasymageConfig:
     MODEL_ENGINE_MAP = {
         "dall-e-3": Engines.OPENAI,
         "dall-e-2": Engines.OPENAI,
-        "gpt-4o": Engines.OPENAI,       
-        "gpt-4o-mini": Engines.OPENAI,  
-
+        "gpt-4o": Engines.OPENAI,
+        "gpt-4o-mini": Engines.OPENAI,
         # Google Ecosystem
         "imagen-4.0-generate-001": Engines.GEMINI,
         "veo-3.0-generate-preview": Engines.GEMINI,
         "gemini-2.5-flash-image": Engines.GEMINI,
         "gemini-3-pro-image-preview": Engines.GEMINI,
-
         # Forge
         "flux1-dev.safetensors": Engines.FORGE,
         "sd_xl_base_1.0.safetensors": Engines.FORGE,
@@ -212,39 +208,59 @@ class EasymageConfig:
         RULE: Do not add any text, notes, or disclaimers after the prompt.
     """
 
-    PROMPT_RANDOM_GEN = """
-        ROLE: You are an Engine of Total Entropy.
-        TASK: Generate a completely random image description. 
-        
-        STRATEGY: MENTALLY ROLL A D6 TO SELECT A MACRO-CATEGORY:
-        
-        [1] NATURE & GEOGRAPHY:
-           - Landscapes, Wildlife, Weather phenomena, Underwater (realistic), Aerial views.
-           - Style: National Geographic Photography.
-           
-        [2] DAILY LIFE & HUMANITY:
-           - Street photography, Cozy interiors, Candid portraits, Cultural festivals, Busy markets.
-           - Style: 35mm Film, Documentary.
-           
-        [3] ART & ILLUSTRATION:
-           - Oil painting, Watercolor, Ukiyo-e, Charcoal sketch, Vector Art, Pop Art.
-           - Subject: Any, interpreted artistically.
-           
-        [4] POP CULTURE & STYLIZED:
-           - Anime (Ghibli/Cyberpunk), Pixel Art, Claymation, Comic Book, Low Poly 3D.
-           - Subject: Characters, Fantasy scenes.
-           
-        [5] ARCHITECTURE & STRUCTURE:
-           - Brutalism, Gothic cathedrals, Modern skyscrapers, Ancient ruins, Industrial machinery.
-           - Style: Architectural Digest, Blueprint.
-           
-        [6] CONCEPTUAL & ABSTRACT:
-           - Macro photography, Fluid simulations, Geometric patterns, Surreal dreamscapes.
+    # CATEGORIES FOR PYTHON-SIDE RNG (20 VARIATIONS)
+    RANDOM_CATEGORIES = {
+        # ... [Your existing 20 categories] ...
+        "NATURE & LANDSCAPES": "National Geographic style. Mountains, forests, deserts, auroras.",
+        "URBAN & STREET": "Magnum Photos style. Busy intersections, rainy neon streets, subway.",
+        "PORTRAITURE & HUMANITY": "Studio lighting or natural light. Expressive faces, elderly textures.",
+        "MACRO & MICRO": "Extreme close-up. Insects (avoid beetles), water droplets, iris details.",
+        "WILDLIFE PHOTOGRAPHY": "Telephoto lens shots. Predators in action, birds in flight.",
+        "GASTRONOMY & FOOD": "Michelin guide style. Molecular gastronomy, steaming street food.",
+        "ARCHITECTURE & INTERIORS": "Architectural Digest style. Brutalism, Modernism, Gothic.",
+        "TRADITIONAL PAINTING": "Oil on canvas, Impasto, Watercolor, Gouache, Charcoal sketch.",
+        "VECTOR & FLAT DESIGN": "Corporate art, Minimalist icons, Pop Art, Bauhaus.",
+        "COMIC & GRAPHIC NOVEL": "Frank Miller style, Noir, Marvel/DC coloring, Manga.",
+        "CONCEPT ART": "Digital painting, ArtStation trending. Matte painting, environment.",
+        "CYBERPUNK & FUTURE": "Blade Runner aesthetic. Neon holograms, cybernetic implants.",
+        "HIGH FANTASY": "D&D style. Wizards, Dragons, Ancient Ruins, Magical Artifacts.",
+        "STEAMPUNK & INDUSTRIAL": "Victorian machinery, Brass gears, Steam engines, Airships.",
+        "DARK FANTASY & GOTHIC": "Eldritch horror, Lovecraftian, Foggy graveyards, Vampiric.",
+        "SPACE & COSMIC": "NASA style or Sci-Fi. Nebulas, Black holes, Alien planets.",
+        "3D RENDER & ISOMETRIC": "Blender/C4D style. Low poly, Claymation, Voxel art.",
+        "RETRO & VAPORWAVE": "80s aesthetic. VHS glitch, Synthwave sun, Miami Vice colors.",
+        "SURREALISM & DREAMCORE": "Salvador Dali style. Melting objects, Liminal spaces.",
+        "FASHION & AVANT-GARDE": "Vogue editorial. Haute couture, experimental fabrics.",
+    }
 
+    RANDOM_MOODS = {
+        "GOLDEN HOUR": "Warm, soft, horizontal sunlight. Long shadows. Nostalgic and peaceful.",
+        "BLUE HOUR": "Twilight, just before sunrise/after sunset. Deep blues, city lights turning on. Melancholic.",
+        "NOIR & MYSTERY": "High contrast black and white or desaturated. Hard shadows (Chiaroscuro), silhouette, fog, dramatic.",
+        "NEON & VIBRANT": "Saturated colors, artificial lighting, glow effects, cyberpunk pinks and cyans. Energetic.",
+        "OVERCAST & MOODY": "Soft diffused light, gray sky, rain, mist. Flat lighting but rich textures. Somber.",
+        "ETHEREAL & DREAMY": "Soft focus, bloom, pastel colors, bright exposure, angelic lighting. Fantasy vibe.",
+        "GRITTY & TEXTURED": "High detail, dirty, raw, film grain, harsh mid-day sun or industrial lighting. Realistic.",
+        "HORROR & UNSETTLING": "Underexposed, greenish or reddish tint, disturbing shadows, flashlight effect. Tense.",
+        "STUDIO CLEAN": "Perfect 3-point lighting, neutral background, commercial look, sharp focus. Professional.",
+        "PSYCHEDELIC": "Shifting colors, kaleidoscope effects, impossible lighting sources, vibrant hallucinations.",
+    }
+    
+    PROMPT_RANDOM_TEMPLATE = """
+        ROLE: You are a World-Class Photographer and Art Director.
+        TASK: Create a highly detailed, realistic, and coherent image description based on:
+        
+        1. SUBJECT CATEGORY: {category_name}
+           -> Context: {category_details}
+           
+        2. ATMOSPHERE & LIGHTING: {mood_name}
+           -> Vibe: {mood_details}
+        
         MANDATORY RULES:
-        - DIVERSITY: Do not stay in one category. Jump wildly between realistic photos and stylized art.
-        - NO CLICHÉS: Avoid Astronauts, Nebulas, Jellyfish, Mushrooms, or generic "war scenes".
-        - SPECIFICITY: Be extremely detailed (e.g., instead of "a bird", say "a wet kingfisher on a mossy branch").
+        - PHYSICAL GROUNDING: The scene must follow the laws of physics. Objects must be solid and placed in a logical environment. NO "dream logic", NO floating objects, NO melting reality (unless the category is explicitly Surrealism).
+        - COHERENCE: If the subject is "Urban", it must look like a real city. If "Nature", it must be a real landscape.
+        - TEXTURE & MATERIAL: Focus on tangible details (e.g., "rough concrete", "rusted metal", "soft silk", "weathered skin").
+        - COMPOSITION: Describe the camera angle (e.g., "Wide shot", "Macro", "Eye level").
         
         {style_instruction}
         RULE: Output ONLY the prompt description. No intro/outro.
@@ -260,7 +276,6 @@ class EasymageConfig:
         "• en=f ➔ Forge / A1111\n"
         "• en=c ➔ ComfyUI"
     )
-
 
     HELP_PARAMS = (
         "⚙️ PARAMETERS\n"
@@ -316,7 +331,7 @@ class EasymageConfig:
         "**Subcommands:**\n"
         "- `img`: Show this help menu.\n"
         "- `img:p`: Prompt Enhancer only (No generation).\n"
-        "- `img:r`: Random \"I'm Feeling Lucky\" mode.\n\n"
+        '- `img:r`: Random "I\'m Feeling Lucky" mode.\n\n'
         "**Examples:**\n"
         "- `img A cat in space` (Default)\n"
         "- `img:r ar=16:9 --no text` (Random Wallpaper)\n"
@@ -546,8 +561,7 @@ class NetworkService:
             return r
 
         except httpx.HTTPStatusError as e:
-            # CRITICAL FIX: Always dump error body on HTTP failure, regardless of debug mode.
-            # This is essential to see OpenAI/Gemini specific error messages (e.g. Safety, Length).
+            # DUMP ERROR TO LOGS
             print(
                 f"\n❌ HTTP ERROR {e.response.status_code} | URL: {url}",
                 file=sys.stderr,
@@ -558,6 +572,30 @@ class NetworkService:
                 file=sys.stderr,
                 flush=True,
             )
+
+            # CRITICAL FIX: Extract the real API error message for the UI
+            try:
+                err_body = e.response.json()
+                # Handle OpenAI / Gemini standard error formats
+                if "error" in err_body:
+                    # OpenAI: error -> message
+                    real_msg = err_body["error"].get("message", "")
+                else:
+                    # Generic or Gemini
+                    real_msg = err_body.get("message", "")
+
+                if real_msg:
+                    # Raise a clean exception with the API explanation
+                    raise Exception(f"API Rejected Request: {real_msg}")
+            except Exception as parse_err:
+                # If json parsing fails or key missing, do nothing and raise original 'e'
+                # unless we successfully raised the custom Exception above.
+                if isinstance(parse_err, Exception) and "API Rejected Request" in str(
+                    parse_err
+                ):
+                    raise parse_err
+
+            # Fallback if no specific message extracted
             raise e
 
         except Exception as e:
@@ -844,6 +882,30 @@ class ImageGenEngine:
     def __init__(self, ctx):
         self.ctx = ctx
 
+    def _get_global_config(self, key: str, default: Any = None) -> Any:
+        """
+        Robustly retrieves configuration values from Open WebUI state.
+        Handles:
+        1. Direct attribute access (Standard)
+        2. _state dictionary lookup (Legacy/Internal)
+        3. PersistentConfig unwrapping (.value)
+        """
+        cfg = self.ctx.request.app.state.config
+        val = default
+
+        # 1. Try Direct Attribute
+        if hasattr(cfg, key):
+            val = getattr(cfg, key)
+        # 2. Try _state dict (fallback)
+        elif hasattr(cfg, "_state") and isinstance(cfg._state, dict):
+            val = cfg._state.get(key, default)
+
+        # 3. Unwrap PersistentConfig if it's an object with a .value attribute
+        if hasattr(val, "value"):
+            return val.value
+
+        return val
+
     async def generate(self) -> str:
         """
         Orchestrates the image generation process. Emits the image upon success.
@@ -966,9 +1028,6 @@ class ImageGenEngine:
 
         if method == "generateContent":
             # Payload for standard Gemini API (Google AI Studio)
-            # FIXED: Implemented correct structure for Gemini 2.5 Flash Image
-            # using responseModalities and imageConfig.
-
             payload = {
                 "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
                 "generationConfig": {
@@ -1032,13 +1091,15 @@ class ImageGenEngine:
         valves = self.ctx.valves
         user_valves = self.ctx.user_valves
 
-        url = conf.AUTOMATIC1111_BASE_URL.rstrip("/")
+        url = self._get_global_config("AUTOMATIC1111_BASE_URL", "").rstrip("/")
 
         # Auth Hierarchy: CLI > UserValve > Valve > Global
         cli_auth = self.ctx.st.model.get("cli_auth")
         user_auth = user_valves.automatic1111_auth
         valve_auth = valves.automatic1111_auth
-        global_auth = getattr(conf, "AUTOMATIC1111_API_AUTH", "")
+
+        # FIX: Robust global retrieval
+        global_auth = self._get_global_config("AUTOMATIC1111_API_AUTH", "")
 
         auth_string = cli_auth or user_auth or valve_auth or global_auth
 
@@ -1089,7 +1150,6 @@ class ImageGenEngine:
         """
         Executes request against OpenAI with Easy Cloud Mode support.
         """
-        conf = self.ctx.request.app.state.config
         valves = self.ctx.valves
         user_valves = self.ctx.user_valves
 
@@ -1098,7 +1158,10 @@ class ImageGenEngine:
             self.ctx.st.model.using_official_url = True
 
         else:
-            base_url = getattr(conf, "IMAGES_OPENAI_API_BASE_URL", "").rstrip("/")
+            # FIX: Robust global retrieval
+            base_url = self._get_global_config("IMAGES_OPENAI_API_BASE_URL", "").rstrip(
+                "/"
+            )
 
             if not base_url:
                 raise Exception(
@@ -1109,8 +1172,13 @@ class ImageGenEngine:
         cli_auth = self.ctx.st.model.get("cli_auth")
         user_auth = user_valves.openai_auth
         valve_auth = valves.openai_auth
-        global_keys = getattr(conf, "IMAGES_OPENAI_API_KEYS", [])
-        global_key = global_keys[0] if global_keys else ""
+
+        # FIX: Try Singular Key first (Standard), then Plural (Rotation)
+        global_key = self._get_global_config("IMAGES_OPENAI_API_KEY", "")
+        if not global_key:
+            global_keys = self._get_global_config("IMAGES_OPENAI_API_KEYS", [])
+            if global_keys and isinstance(global_keys, list):
+                global_key = global_keys[0]
 
         api_key = cli_auth or user_auth or valve_auth or global_key
 
@@ -1158,7 +1226,6 @@ class ImageGenEngine:
         """
         Executes request against Gemini/Imagen with strict 2026 API adherence.
         """
-        conf = self.ctx.request.app.state.config
         valves = self.ctx.valves
         user_valves = self.ctx.user_valves
 
@@ -1167,21 +1234,33 @@ class ImageGenEngine:
             base_url = self.ctx.config.OFFICIAL_URLS["gemini"]
             self.ctx.st.model.using_official_url = True
         else:
-            base_url = getattr(conf, "IMAGES_GEMINI_API_BASE_URL", "").rstrip("/")
+            # FIX: Robust retrieval
+            base_url = self._get_global_config("IMAGES_GEMINI_API_BASE_URL", "").rstrip(
+                "/"
+            )
             if not base_url:
-                raise Exception("Gemini Base URL missing. Enable Easy Cloud Mode or check Global Settings.")
+                raise Exception(
+                    "Gemini Base URL missing. Enable Easy Cloud Mode or check Global Settings."
+                )
 
         # Auth Setup
         cli_auth = self.ctx.st.model.get("cli_auth")
         user_auth = user_valves.gemini_auth
         valve_auth = valves.gemini_auth
-        global_key = getattr(conf, "IMAGES_GEMINI_API_KEY", "")
+
+        # FIX: Robust retrieval
+        global_key = self._get_global_config("IMAGES_GEMINI_API_KEY", "")
+
         api_key = cli_auth or user_auth or valve_auth or global_key
 
-        if cli_auth: self.ctx.st.model.api_source = "CLI Override"
-        elif user_auth: self.ctx.st.model.api_source = "User Profile"
-        elif valve_auth: self.ctx.st.model.api_source = "Filter Default"
-        else: self.ctx.st.model.api_source = "System Settings"
+        if cli_auth:
+            self.ctx.st.model.api_source = "CLI Override"
+        elif user_auth:
+            self.ctx.st.model.api_source = "User Profile"
+        elif valve_auth:
+            self.ctx.st.model.api_source = "Filter Default"
+        else:
+            self.ctx.st.model.api_source = "System Settings"
 
         if not api_key:
             raise Exception("No Gemini API Key found.")
@@ -1206,18 +1285,22 @@ class ImageGenEngine:
             # IMAGEN 4 / VEO Payload
             # Documentation: https://ai.google.dev/gemini-api/docs/imagen
             m = self.ctx.st.model
-            
+
             # AR Calculation
             try:
                 w, h = map(int, (m.size or "1024x1024").split("x"))
-                rat = w/h
+                rat = w / h
                 ar = (
-                    "16:9" if rat > 1.7 else 
-                    ("4:3" if rat > 1.3 else 
-                    ("9:16" if rat < 0.6 else 
-                    ("3:4" if rat < 0.8 else "1:1")))
+                    "16:9"
+                    if rat > 1.7
+                    else (
+                        "4:3"
+                        if rat > 1.3
+                        else ("9:16" if rat < 0.6 else ("3:4" if rat < 0.8 else "1:1"))
+                    )
                 )
-            except: ar = "1:1"
+            except:
+                ar = "1:1"
 
             # STRICT MINIMAL PAYLOAD
             # Removed 'safetySetting', 'personGeneration', 'addWatermark' to avoid HTTP 400 errors.
@@ -1226,33 +1309,38 @@ class ImageGenEngine:
                 "aspectRatio": ar,
                 "outputOptions": {"mimeType": "image/png"},
             }
-            
+
             if m.negative_prompt:
                 params["negativePrompt"] = m.negative_prompt
 
-            if m.seed and m.seed != -1: 
+            if m.seed and m.seed != -1:
                 params["seed"] = m.seed
 
-            payload = {"instances": [{"prompt": m.enhanced_prompt}], "parameters": params}
+            payload = {
+                "instances": [{"prompt": m.enhanced_prompt}],
+                "parameters": params,
+            }
 
         else:
             # GEMINI NANO BANANA Payload (:generateContent)
             # Documentation: https://ai.google.dev/gemini-api/docs/image-generation
             m = self.ctx.st.model
-            
+
             payload = {
                 "contents": [{"parts": [{"text": m.enhanced_prompt}]}],
                 "generationConfig": {
                     "candidateCount": 1,
                     "responseModalities": ["IMAGE"],  # MANDATORY for Nano Banana
-                }
+                },
             }
-            
+
             # Gemini 2.0+ Image Config (Experimental)
             if m.aspect_ratio and m.aspect_ratio != "1:1":
                 # Some endpoint versions might ignore this or use different structure
                 # but currently this is the cleanest way to attempt AR on generateContent
-                payload["generationConfig"]["imageConfig"] = {"aspectRatio": m.aspect_ratio}
+                payload["generationConfig"]["imageConfig"] = {
+                    "aspectRatio": m.aspect_ratio
+                }
 
         # Headers
         headers = {"Content-Type": "application/json"}
@@ -1266,8 +1354,13 @@ class ImageGenEngine:
             self.ctx.debug.log(f"[GEN] GEMINI PAYLOAD: {json.dumps(payload, indent=2)}")
 
         # 5. Execution & Error Trapping
-        r = await self.ctx.net.post(url, payload=payload, headers=headers, timeout=valves.generation_timeout)
-        
+        r = await self.ctx.net.post(
+            url,
+            payload=payload,
+            headers=headers,
+            timeout=valves.generation_timeout,
+        )
+
         # Explicit Error Handling for Chat Visibility
         if r.status_code >= 400:
             try:
@@ -1275,9 +1368,13 @@ class ImageGenEngine:
                 err_msg = err_body.get("error", {}).get("message", r.text)
                 # Friendly error mapping
                 if "not supported for predict" in err_msg:
-                    raise Exception(f"Model '{model_name}' mismatch. Try using 'i4' (Imagen 4) or 'g2.5' (Gemini). \nraw: {err_msg}")
+                    raise Exception(
+                        f"Model '{model_name}' mismatch. Try using 'i4' (Imagen 4) or 'g2.5' (Gemini). \nraw: {err_msg}"
+                    )
                 if "response modalities" in err_msg:
-                    raise Exception(f"Model '{model_name}' cannot generate images. It is likely a text-only model. Use 'g2.5' or 'i4'.")
+                    raise Exception(
+                        f"Model '{model_name}' cannot generate images. It is likely a text-only model. Use 'g2.5' or 'i4'."
+                    )
                 raise Exception(f"Google API Error ({r.status_code}): {err_msg}")
             except Exception as e:
                 # Re-raise nicely formatted
@@ -1290,9 +1387,13 @@ class ImageGenEngine:
         if method == "generateContent":
             # Gemini
             try:
-                img_b64 = res["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                img_b64 = res["candidates"][0]["content"]["parts"][0]["inlineData"][
+                    "data"
+                ]
             except:
-                raise Exception(f"No image in Gemini response. Safety block? {json.dumps(res)}")
+                raise Exception(
+                    f"No image in Gemini response. Safety block? {json.dumps(res)}"
+                )
         else:
             # Imagen
             try:
@@ -1879,7 +1980,9 @@ class Filter:
 
         if self.st.model.debug:
             # Temporary debug service before full init
-            print(f"⚡ [INLET] Triggered: {trigger} | Sub: {subcommand}", file=sys.stderr)
+            print(
+                f"⚡ [INLET] Triggered: {trigger} | Sub: {subcommand}", file=sys.stderr
+            )
 
         # --- FAST EXIT: HELP SYSTEM (SILENT MODE) ---
         # Immediate short-circuit if subcommand is '?' or 'help'.
@@ -1941,7 +2044,9 @@ class Filter:
                 m.engine = detected_engine
             elif m._explicit_engine and not m._explicit_model:
                 if detected_engine and detected_engine != m.engine:
-                    self.debug.log(f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting.")
+                    self.debug.log(
+                        f"Conflict: Engine {m.engine} incompatible with model {m.model}. Resetting."
+                    )
                     m.model = None
             elif self.valves.easy_cloud_mode and detected_engine:
                 m.engine = detected_engine
@@ -1962,13 +2067,17 @@ class Filter:
                 is_cloud_engine = self.st.model.engine in [E.OPENAI, E.GEMINI]
 
                 if not is_cloud_engine:
-                    if self.st.model.debug: self.debug.log("[STEP 5/10] Cleaning VRAM")
+                    if self.st.model.debug:
+                        self.debug.log("[STEP 5/10] Cleaning VRAM")
                     await self.em.emit_status("Cleaning VRAM..")
-                    await self.inf.purge_vram(unload_current=self.valves.extreme_vram_cleanup)
+                    await self.inf.purge_vram(
+                        unload_current=self.valves.extreme_vram_cleanup
+                    )
 
                 # IMAGE GENERATION
-                if self.st.model.debug: self.debug.log("[STEP 6/10] Generating Image")
-                
+                if self.st.model.debug:
+                    self.debug.log("[STEP 6/10] Generating Image")
+
                 # This call will raise Exception if API fails (400/404/500)
                 await self.img_gen.generate()
 
@@ -1978,44 +2087,48 @@ class Filter:
                     if self.st.model.image_url
                     else ""
                 )
-                
+
                 if self.st.output_content:
-                    self.st.output_content = self.st.output_content.strip() + "\n" + img_md
+                    self.st.output_content = (
+                        self.st.output_content.strip() + "\n" + img_md
+                    )
                 else:
                     self.st.output_content = img_md
 
                 # Vision Audit
                 if self.st.model.quality_audit:
-                    if self.st.model.debug: self.debug.log("[STEP 7/10] Vision Audit")
+                    if self.st.model.debug:
+                        self.debug.log("[STEP 7/10] Vision Audit")
                     await self._vision_audit()
 
                 # Emit Placeholders for Outlet
                 await self.em.emit_message("\n\n[1] [2] [3]")
                 self.st.output_content += "\n\n[1] [2] [3]"
-                
+
                 self.st.executed = True
-                if self.st.model.debug: self.debug.log("[STEP 9/10] Inlet Finished")
+                if self.st.model.debug:
+                    self.debug.log("[STEP 9/10] Inlet Finished")
 
         except Exception as e:
             # --- CRITICAL ERROR HANDLER ---
             # Catches API Errors (Google 404, OpenAI 400, etc.) and prints them to chat.
-            
+
             error_header = "\n\n❌ **GENERATION FAILED**\n"
             error_body = f"> {str(e)}"
             full_error = error_header + error_body
 
             # 1. Log to Console
             await self.debug.error(f"Inlet Exception: {str(e)}")
-            
+
             # 2. Update UI Status
             await self.em.emit_status("Execution Aborted!", True)
-            
+
             # 3. Force Error into Chat Stream
             # We append it to output_content so outlet() can deliver it safely
             if self.st:
                 self.st.output_content += full_error
-                self.st.executed = True # Ensure outlet picks this up
-            
+                self.st.executed = True  # Ensure outlet picks this up
+
             # 4. Immediate Emit (in case outlet doesn't trigger on some errors)
             await self.em.emit_message(full_error)
 
@@ -2023,6 +2136,7 @@ class Filter:
 
     async def _emit_debug_dump(self):
         """Helper to emit sanitized debug info"""
+
         def _sanitize(data: dict):
             safe = data.copy()
             for k, v in safe.items():
@@ -2043,6 +2157,7 @@ class Filter:
         )
         self.st.output_content += debug_block
         await self.em.emit_message(debug_block)
+
     async def outlet(
         self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None
     ) -> dict:
@@ -2180,36 +2295,47 @@ class Filter:
         E = self.config.Engines
 
         # LOGIC BRANCH: Random Mode (img:r)
+        # LOGIC BRANCH: Random Mode (img:r)
         if self.st.model.subcommand == "r":
             if self.st.model.debug:
                 self.debug.log("[CTX] Entering Random Mode Generation")
 
             # Build Style Instructions (Positive & Negative)
             style_parts = []
-
             if self.st.model.user_prompt and len(self.st.model.user_prompt.strip()) > 1:
-                style_parts.append(
-                    f"MANDATORY STYLE/THEME: {self.st.model.user_prompt}"
-                )
-
-            # FIX: Explicitly forbid negative elements in the generation phase
+                style_parts.append(f"MANDATORY STYLE/THEME: {self.st.model.user_prompt}")
+            
             if self.st.model.negative_prompt:
-                style_parts.append(
-                    f"ABSOLUTE PROHIBITION: Do NOT include, mention, or describe: {self.st.model.negative_prompt}."
-                )
+                style_parts.append(f"ABSOLUTE PROHIBITION: Do NOT include: {self.st.model.negative_prompt}.")
 
             style_instruction = "\n".join(style_parts)
 
+            # --- PYTHON RNG SELECTION (DOUBLE DICE) ---
+            import random
+            
+            # Roll for Category (Subject)
+            cat_name, cat_details = random.choice(list(self.config.RANDOM_CATEGORIES.items()))
+            
+            # Roll for Mood (Lighting)
+            mood_name, mood_details = random.choice(list(self.config.RANDOM_MOODS.items()))
+            
+            if self.st.model.debug:
+                self.debug.log(f"[CTX] RNG: {cat_name} + {mood_name}")
+
             # Generate the random prompt
             rand_prompt = await self.inf._infer(
-                task="Randomizing Prompt",
+                task=f"Randomizing ({cat_name})",
                 data={
-                    "system": self.config.PROMPT_RANDOM_GEN.format(
+                    "system": self.config.PROMPT_RANDOM_TEMPLATE.format(
+                        category_name=cat_name,
+                        category_details=cat_details,
+                        mood_name=mood_name,
+                        mood_details=mood_details,
                         style_instruction=style_instruction
                     ),
                     "user": "Generate a random image prompt now.",
                 },
-                creative_mode=True,  # High temperature for variance
+                creative_mode=True,
             )
 
             self.st.model.enhanced_prompt = (
@@ -2218,13 +2344,15 @@ class Filter:
                 else "A random abstract masterpiece."
             )
 
-            # Overwrite the user prompt for display purposes in citations
+            # Update User Prompt for Citation Display
+            # Shows: "[URBAN & STREET / NOIR] A wet street..."
             self.st.model.user_prompt = (
-                f"[Random] {self.st.model.enhanced_prompt[:50]}..."
+                f"[{cat_name} / {mood_name}] {self.st.model.enhanced_prompt[:50]}..."
             )
 
         # LOGIC BRANCH: Standard Enhancement (img / img:p)
         else:
+            # ... [Standard enhancement logic remains unchanged] ...
             native_support = (self.st.model.engine == E.GEMINI) or (
                 self.st.model.engine == E.FORGE and self.st.model.enable_hr
             )
@@ -2625,17 +2753,21 @@ class Filter:
             # it is likely pollution from Global Settings (e.g., "automatic1111").
             # We strictly enforce the 2026 Standard: Imagen 4.
             is_valid_google = any(k in mdl for k in ["imagen", "gemini", "veo"])
-            
+
             if not mdl or not is_valid_google:
                 self.st.model["model"] = "imagen-4.0-generate-001"
+                mdl = "imagen-4.0-generate-001"  # FIX: Sync local var for downstream logic
 
         # 2. OPENAI VALIDATION
         elif eng == E.OPENAI:
             if "dall-e" not in mdl and "gpt-4" not in mdl:
                 self.st.model["model"] = "dall-e-3"
+                mdl = "dall-e-3"  # FIX: Sync local var for downstream logic
 
         # 3. ASPECT RATIO & SIZE NORMALIZATION
-        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get("aspect_ratio")
+        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
+            "aspect_ratio"
+        )
 
         try:
             # Parse Width/Height
@@ -2643,7 +2775,7 @@ class Filter:
                 w, h = map(int, sz.split("x"))
             else:
                 w, h = int(sz), int(sz)
-            
+
             # Calculate Ratio 'r' from AR if present, else from size
             if ar and ":" in str(ar):
                 num, den = map(int, ar.split(":"))
@@ -2656,29 +2788,42 @@ class Filter:
         # Engine-Specific Dimension Logic
         if eng == E.OPENAI or "dall-e" in mdl:
             # DALL-E 3 Logic (Rectangles allowed)
+            # FIX: Now 'mdl' contains 'dall-e-3' even if implicitly set above
             if "dall-e-3" in mdl:
                 if r > 1.2:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1792x1024", "16:9")
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1792x1024",
+                        "16:9",
+                    )
                 elif r < 0.8:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1024x1792", "9:16")
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1024x1792",
+                        "9:16",
+                    )
                 else:
-                    self.st.model["size"], self.st.model["aspect_ratio"] = ("1024x1024", "1:1")
+                    self.st.model["size"], self.st.model["aspect_ratio"] = (
+                        "1024x1024",
+                        "1:1",
+                    )
             else:
                 # DALL-E 2 Logic (Squares only)
                 target = 1024
                 try:
                     req_w = int(self.st.model.size.split("x")[0])
-                    if req_w <= 256: target = 256
-                    elif req_w <= 512: target = 512
-                except: pass
+                    if req_w <= 256:
+                        target = 256
+                    elif req_w <= 512:
+                        target = 512
+                except:
+                    pass
                 self.st.model["size"] = f"{target}x{target}"
                 self.st.model["aspect_ratio"] = "1:1"
 
         else:
-            # Forge, Gemini, ComfyUI: 
+            # Forge, Gemini, ComfyUI:
             # 1. Respect Aspect Ratio if provided
             # 2. Snap dimensions to multiples of 8 (safer for encoders)
-            if ar: 
+            if ar:
                 # Recalculate H based on W and AR
                 final_w = w
                 final_h = int(w / r)
@@ -2688,8 +2833,9 @@ class Filter:
             # Snap to 8
             final_w = (final_w // 8) * 8
             final_h = (final_h // 8) * 8
-            
+
             self.st.model["size"] = f"{final_w}x{final_h}"
+
     def _apply_global_settings(self):
         """
         Merges global environment variables from Open WebUI config into the state.
@@ -2755,17 +2901,17 @@ class Filter:
 
         # 2. SHORTCUTS (Models & Engines)
         model_lines = [f"• {k} ➔ {v}" for k, v in self.config.MODEL_SHORTCUTS.items()]
-        
+
         # Inject models into the template
-        sc_content = self.config.HELP_SHORTCUTS.format(
-            models=chr(10).join(model_lines)
-        )
+        sc_content = self.config.HELP_SHORTCUTS.format(models=chr(10).join(model_lines))
 
         await self.em.emit_citation("⚡ SHORTCUTS", sc_content.strip(), "1", "help-1")
 
         # 3. PARAMETERS (Flags)
         # Directly use the static template
-        await self.em.emit_citation("🎛️ PARAMETERS", self.config.HELP_PARAMS.strip(), "2", "help-2")
+        await self.em.emit_citation(
+            "🎛️ PARAMETERS", self.config.HELP_PARAMS.strip(), "2", "help-2"
+        )
 
         # 4. ADVANCED (Samplers/Schedulers)
         smp_lines = [f"• {k} ➔ {v}" for k, v in self.config.FORGE_SAMPLER_MAP.items()]
@@ -2773,13 +2919,10 @@ class Filter:
 
         # Inject dynamic lists into the template
         adv_content = self.config.HELP_ADVANCED.format(
-            samplers=chr(10).join(smp_lines),
-            schedulers=chr(10).join(sch_lines)
+            samplers=chr(10).join(smp_lines), schedulers=chr(10).join(sch_lines)
         )
 
-        await self.em.emit_citation(
-            "❗ FORGE", adv_content.strip(), "3", "help-3"
-        )
+        await self.em.emit_citation("❗ FORGE", adv_content.strip(), "3", "help-3")
 
         # 5. INFO & BETA
         # Inject version into the template
