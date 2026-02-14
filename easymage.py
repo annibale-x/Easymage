@@ -124,7 +124,7 @@ class EasymageConfig:
 
         # Google Nano Banana / Gemini (Endpoint: :generateContent)
         "g2.5f": "gemini-2.5-flash-image",          # Nano Banana (Fast)
-        "g3": "gemini-3-pro-image-preview",        # Nano Banana Pro (High Quality)
+        "g3p": "gemini-3-pro-image-preview",        # Nano Banana Pro (High Quality)
 
         # Local / Forge
         "flux": "flux1-dev.safetensors",

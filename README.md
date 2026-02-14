@@ -182,12 +182,13 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 | `d3` | `dall-e-3` | Standard DALL-E 3 |
 | `d2` | `dall-e-2` | Legacy DALL-E 2 |
 | `g4o` | `gpt-4o` | Multimodal |
+| `g4om` | `gpt-4o-mini` | Multimodal Mini|
 | **Google Imagen Series** | | |
 | `i4` | `imagen-4.0-generate-001` | **Imagen 4 (Full)** - Standard 2026 |
 | `veo` | `veo-3.0-generate-preview` | **Veo 3** (Frame Gen / 4K) |
 | **Google Gemini Series** | | |
 | `g2.5f` | `gemini-2.5-flash-image` | **Nano Banana** (Flash / Fast) |
-| `g3` | `gemini-3-pro-image-preview` | **Nano Banana Pro** (High Quality) |
+| `g3p` | `gemini-3-pro-image-preview` | **Nano Banana Pro** (High Quality) |
 | **Local / Forge** | | |
 | `flux` | `flux1-dev.safetensors` | Flux 1 Dev |
 | `sdxl` | `sd_xl_base_1.0.safetensors` | SDXL Base |
