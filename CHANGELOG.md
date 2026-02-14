@@ -1,3 +1,14 @@
+**v0.9.1-beta.9 (2026-02-15)**
+
+- Subcommand Architecture: Unified workflow with `img:p` (Prompt Only), `img:r` (Entropy Randomizer), and `img ?` (Interactive Help).
+- Entropy Engine 2.0: Replaced LLM-based randomizer with a deterministic Python-side "Double Dice" system (20 Categories + 10 Moods) to enforce physical grounding and stylistic diversity.
+- Direct Dispatch Core: Implemented a global persistent HTTP client for zero-latency connection pooling and direct backend execution (bypassing OWUI chat overhead).
+- Smart VRAM Management: Added automatic model unloading and an "Extreme Cleanup" valve to prevent OOM errors on local backends.
+- Forge Power-Ups: Exposed granular High-Res Fix controls via CLI (`hr`, `hru`, `dns`, `hdcs`).
+- Error Intelligence: Now extracts and displays raw API error messages (e.g., OpenAI Safety Violations) directly in the chat.
+- Fixes: Resolved OpenAI size snapping (Error 400), Global Config retrieval for `PersistentConfig` objects, and unified Forge/A1111 terminology.
+
+
 **v0.8.1 (2026-02-10)**
 
 - Intelligent Router: Implemented a dispatcher with dedicated methods for each engine.
