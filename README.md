@@ -1,5 +1,5 @@
 
-# ✨ Easymage 0.9.2-beta.2: Multilingual Prompt Enhancer & Vision QC
+## ✨ Easymage 0.9.2-beta.2: Multilingual Prompt Enhancer & Vision QC
 
 Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
