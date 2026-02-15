@@ -47,7 +47,7 @@ New to Easymage? Try these commands to see what it can do.
 ### ✨ Key Features
 
 *   **🌍 Multilingual Native**: You don't need to speak English to get professional results. Write your prompt in **any language**. Easymage detects the language, translates it, and expands it into technical English optimized for the specific generation model.
-*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for Forge, `OpenAI (DALL-E-3 / DALL-E-2)`, and the full `Google Ecosystem (Gemini 1.5/2.0/3 Flash/Pro & Imagen 3)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
+*   **Advanced Multi-Engine Routing**: Native Direct HTTPX support for Forge, `OpenAI (DALL-E-3 / DALL-E-2)`, and the full `Google Ecosystem (Imagen4, Veo, Nano Banana)`, with a standard API fallback for `ComfyUI`. Easymage translates universal commands into the specific "technical dialect" of each API.
     > **📝 Compatibility Note**: Throughout this documentation, we use **"Forge"** to refer to local Stable Diffusion backends. Easymage is fully compatible with both **WebUI Forge** and the classic **Automatic1111 SD-WebUI**, as they share the same API structure.
 *   **VRAM Auto-Optimization**: Automatically manages your GPU memory. Before generating an image, Easymage checks your Ollama server and unloads unused models to ensure Forge or ComfyUI have enough VRAM to operate without crashing.
 *   **Zero-Latency Dispatch**: Uses a persistent connection pool to communicate with backends. This reduces the time-to-first-token and image generation start time by eliminating repetitive network handshakes.

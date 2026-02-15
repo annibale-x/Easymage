@@ -2352,7 +2352,6 @@ class Filter:
 
         # LOGIC BRANCH: Standard Enhancement (img / img:p)
         else:
-            # ... [Standard enhancement logic remains unchanged] ...
             native_support = (self.st.model.engine == E.GEMINI) or (
                 self.st.model.engine == E.FORGE and self.st.model.enable_hr
             )
