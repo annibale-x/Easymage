@@ -164,7 +164,7 @@ Flags provide a quick way to override your default **Valves** configuration for 
 Easymage uses optimized shortcodes to minimize typing while maintaining full technical control. However, for those who prefer clarity or are using scripts, **full parameter names are also supported**.
 
 <details>
-<summary><strong>Engine Shortcuts (`ge=...`)</strong></summary>
+<summary>⚡ Engine Shortcuts (`ge=...`) ▼</summary>
 
 | Shortcut | Engine Name | Backend API |
 | :--- | :--- | :--- |
@@ -175,7 +175,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 </details>
 
 <details>
-<summary><strong>Model Shortcuts (`mdl=...`)</strong></summary>
+<summary>⚡ Model Shortcuts (`mdl=...`) ▼</summary>
 
 | Shortcut | API Model Name / Identifier | Note / Description |
 | :--- | :--- | :--- |
@@ -196,7 +196,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 </details>
 
 <details>
-<summary><strong>Aspect Ratio Shortcuts (`ar=...`)</strong></summary>
+<summary>⚡ Aspect Ratio Shortcuts (`ar=...`) ▼</summary>
 
 | Shortcut | Ratio | Common Use Case |
 | :--- | :--- | :--- |
@@ -209,7 +209,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 </details>
 
 <details>
-<summary><strong>Sampler Shortcuts (`smp=...`)</strong></summary>
+<summary>⚡ Sampler Shortcuts (`smp=...`) ▼</summary>
 
 | Code | Full Sampler Name | Code | Full Sampler Name |
 | :--- | :--- | :--- | :--- |
@@ -228,7 +228,7 @@ Easymage uses optimized shortcodes to minimize typing while maintaining full tec
 </details>
 
 <details>
-<summary><strong>Scheduler Shortcuts (`sch=...`)</strong></summary>
+<summary>⚡ Scheduler Shortcuts (`sch=...`) ▼</summary>
 
 | Code | Full Scheduler Name | Code | Full Scheduler Name |
 | :--- | :--- | :--- | :--- |
@@ -288,7 +288,7 @@ When the LLM Fallback is active, the system prompt for the Enhancer is dynamical
 Easymage acts as a high-level abstraction layer. It converts universal parameters into the specific JSON payloads required by each engine. Below are the technical mapping details.
 
 <details>
-<summary><strong>➡️ View Full Mapping Tables</strong></summary>
+<summary>⚡➡️ View Full Mapping Tables</summary>
 
 #### 1. Forge / Automatic1111 (Direct HTTPX)
 *Connection: Sends a direct POST request to `/sdapi/v1/txt2img`.*
