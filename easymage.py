@@ -1464,14 +1464,18 @@ class PromptParser:
             self.ctx.debug.log(f"[PARSER] Input: {user_prompt[:50]}...")
 
         m_st = self.ctx.st.model
-        clean, neg = user_prompt, ""
 
-        # FIX: Robust negative prompt split handling both '--no' and em-dash '—no'
+        # Normalize typographic dashes (em-dash, en-dash) to standard ASCII hyphens
+        # This prevents mobile keyboards or OS auto-corrections from breaking the CLI parser
+        clean = user_prompt.replace("—", "--").replace("–", "-")
+        neg = ""
+
+        # FIX: Robust negative prompt split handling '--no'
         # Handles case-insensitive splitting.
-        split_match = re.search(r"\s+(?:--|—)no\s+", clean, re.IGNORECASE)
+        split_match = re.search(r"\s+--no\s+", clean, re.IGNORECASE)
         if split_match:
-            clean = user_prompt[: split_match.start()]
-            neg = user_prompt[split_match.end() :]
+            neg = clean[split_match.end() :]
+            clean = clean[: split_match.start()]
 
         if " -- " in clean:
             prefix, subj = clean.split(" -- ", 1)
