@@ -10,23 +10,10 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.3 (vs v0.9.2-beta.2)
+### 🆕 What's New in v0.9.3
 
--   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
--   **Entropy Engine (Random Mode)**: The new `img:r` command uses a **Deterministic  Double-Dice System** executed in Python code (not LLM hallucinations) to ensure true diversity.
--   **Integrated Help System**: Typing `img ?` or simply `img` (with no prompt) now injects a visual manual directly into the chat. It creates interactive citation badges for models, parameters, and engine codes, eliminating the need to memorize syntax.
--   **Expanded High-Res Parameters**: Added granular control for Forge upscaling via CLI, including `hr` (scale), `hru` (upscaler model), `dns` (denoising strength), and `hdcs` (distilled CFG).
--   **High-Performance Connection Pooling**: Implements a global, persistent HTTP client for Ollama, OpenAI, and Forge. Eliminates handshake latency and keeps connections alive for instant response times.
--   **Direct API Dispatch**: Completely bypasses Open WebUI's internal chat completion logic. Requests are sent directly to the backend (Ollama/OpenAI), preventing history pollution and database bloat.
--   **Environment-Agnostic VRAM Management**:
-    -   **Standard Cleanup**: Automatically unloads unused models from VRAM before starting image generation, preventing Out-Of-Memory errors on consumer GPUs.
-    -   **Extreme Cleanup Valve**: Optional setting to unload *everything* (including the active LLM) for maximum VRAM availability during generation.
--   **Context & Session Stability**: Optimized payload logic prevents unnecessary model reloading in Ollama, solving "VRAM thrashing" issues during complex multi-step workflows.
--   **Engine-Level Determinism**: Custom dispatcher for Ollama/OpenAI ensures 1:1 seed reproducibility by bypassing middleware interference.
--   **Selective Negation Strategy**: Smart logic chooses between native API or LLM integration based on engine support and Hires Fix status.
--   **Universal CLI Syntax**: Full control via `sz=`, `stp=`, `sd=`, `dcs=`, `hdcs=`, and specialized shortcuts.
--   **Dual-Layer Negative Prompts**: Automatic fallback to AVOID protocol for limited engines (OpenAI/Comfy).
--   **Refined Error Interception**: Unified handling for backend timeouts and API failures via Docker logging and UI alerts.
+-   **Aspect Ratio Intelligence**: Fixed a critical bug where a hidden default aspect ratio was overriding custom dimensions. The system now mathematically infers the correct ratio from your `Size` setting automatically. It prioritizes explicit `Aspect Ratio` values only when manually set, recalculating the image height to ensure perfect proportions.
+-   **CLI Typographic Normalization**: The Prompt Parser now intercepts and normalizes typographic dashes (like the em-dash `—` or en-dash `–` automatically inserted by mobile keyboards and macOS/iOS) back into valid CLI parameters (`--`), preventing syntax errors on smartphones.
 
 ---
 
@@ -352,7 +339,7 @@ Easymage handles dimensions dynamically to satisfy different engine requirements
    - **OpenAI (DALL-E 3)**: Ignores specific pixels and "snaps" to the closest supported HD resolution (`1024x1024`, `1792x1024`, or `1024x1792`) based on the calculated aspect ratio.
    - **Gemini (Imagen 3)**: Converts the dimensions into one of the supported ratio strings (`1:1`, `4:3`, `16:9`, etc.).
    - **Forge / A1111**: Uses the requested pixels but rounds them to the nearest multiple of **8** to ensure hardware compatibility.
-3. **AR Overriding**: If the `ar` parameter is present, it takes precedence in calculating the final height relative to the requested width.
+3. **Aspect Ratio Intelligence**: The `ar` (Aspect Ratio) parameter has mathematical priority over the `sz` (Size) parameter. If an explicit Aspect Ratio is provided (via CLI or User Valves), the width of your `sz` is kept as the base reference, and the height is automatically recalculated to perfectly match the requested ratio (`Height = Width / Ratio`). If no `ar` is provided, the system infers the exact ratio automatically from your `sz` dimensions using their greatest common divisor.
 
 ---
 
@@ -380,8 +367,8 @@ These settings are specific to **your account** or current chat context. You can
 | `debug` | `False` | Prints the full internal state JSON and API payloads to the server console. |
 | **⚙️ Generation Parameters** | | |
 | `model` | `None` | Forces a specific checkpoint (e.g., `flux1-dev.safetensors`) for all requests. |
-| `size` | `1024x1024` | Default image resolution (`WxH`). |
-| `aspect_ratio` | `1:1` | Default aspect ratio (e.g., `16:9`, `4:3`). Overrides `size` calculation if set. |
+| `size` | `1024x1024` | Default image resolution (`WxH`). It serves as the absolute base reference for the image width. |
+| `aspect_ratio` | `""` *(Empty)* | Target aspect ratio (e.g., `16:9`, `4:3`). <br>**Behavior:** If left empty, it is automatically derived from the `size`. If explicitly set, it **overrides the height** of your `size` parameter to enforce perfect proportions (Height = Width / Ratio). |
 | `steps` | `20` | Number of sampling steps (Forge / A1111 only). |
 | `seed` | `-1` | Default seed (`-1` = Random). |
 | `cfg_scale` | `1.0` | Classifier-Free Guidance scale. |
