@@ -1,6 +1,6 @@
 """
 title: ✨Easymage: Generative Imaging & Prompt Engineering Filter
-version: 0.9.4
+version: 0.9.3
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.routers.images import CreateImageForm, image_generations  # type
 from pydantic import BaseModel, Field
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.4"
+EM_VERSION = "0.9.3"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---

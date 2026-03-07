@@ -10,11 +10,11 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.4 (vs v0.9.3)
+### 🆕 What's New in v0.9.3 (vs v0.9.2-beta.2)
 
--   **Aspect Ratio Intelligence**: Fixed a critical bug where a hidden default aspect ratio was overriding custom dimensions. The system now mathematically infers the correct ratio from your `Size` setting automatically. It prioritizes explicit `Aspect Ratio` values only when manually set, recalculating the image height to ensure perfect proportions.
--   **CLI Typographic Normalization**: The Prompt Parser now intercepts and normalizes typographic dashes (like the em-dash `—` or en-dash `–` automatically inserted by mobile keyboards and macOS/iOS) back into valid CLI parameters (`--`), preventing syntax errors on smartphones.
--   **Privacy & Local Setup Documentation**: Added a dedicated section explaining how to force 100% local execution using the `easy_cloud_mode` toggle, specifically for users running backends like LM Studio or local ComfyUI.
+-   **Aspect Ratio Intelligence**: Fixed a critical bug where a hidden default aspect ratio was overriding custom dimensions. The system now mathematically infers the correct ratio from your `Size` setting automatically.
+-   **CLI Typographic Normalization**: The Prompt Parser now intercepts and normalizes typographic dashes (like the em-dash `—` or en-dash `–` automatically inserted by mobile keyboards) back into valid CLI parameters (`--`), preventing syntax errors on smartphones.
+-   **Privacy & Local Setup**: Added a dedicated section explaining how to force 100% local execution using the `easy_cloud_mode` toggle.
 
 ---
 
