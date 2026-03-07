@@ -1,5 +1,5 @@
 
-## ✨ Easymage 0.9.2-beta.2: Multilingual Prompt Enhancer & Vision QC
+## ✨ Easymage 0.9.3: Multilingual Prompt Enhancer & Vision QC
 
 Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
@@ -10,7 +10,7 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.2-beta.2 (vs v0.6.3)
+### 🆕 What's New in v0.9.3 (vs v0.9.2-beta.2)
 
 -   **Subcommand Architecture**: Replaced the legacy `imgx` trigger with a unified syntax (`img:p`, `img:r`, `img ?`). This streamlines the workflow, allowing seamless switching between generation, prompting, and random modes without changing the base command.
 -   **Entropy Engine (Random Mode)**: The new `img:r` command uses a **Deterministic  Double-Dice System** executed in Python code (not LLM hallucinations) to ensure true diversity.
@@ -108,9 +108,9 @@ Here is the order of priority, from highest to lowest:
 
 | Priority | Source | Description |
 | :---: | :--- | :--- |
-| **1 (Highest)** | **Command Line (CLI)** | Parameters typed directly into your chat message (e.g., `sd=123`). These are temporary and last for only one generation. |
-| **2 (Medium)** | **Easymage Valves** | Your personal defaults, configured in `Settings > Filters`. These apply to all your `img` commands unless a CLI parameter is used. |
-| **3 (Lowest)** | **Global OWUI Settings** | The server-wide defaults for image generation, usually configured by an administrator. Easymage uses these as a final fallback. |
+| **1 (Highest)** | **Command Line (CLI)** | Parameters typed directly into your chat message (e.g., `sz=1024x1024`). These are temporary and last for only one generation. |
+| **2 (Medium)** | **User Valves (Chat Controls)** | Your personal defaults, configured via the **Controls** icon within a chat. These apply to all your `img` commands in that context unless a CLI parameter is used. |
+| **3 (Lowest)** | **Global OWUI Settings** | The server-wide defaults for image generation, configured by an admin in `Admin Panel > Settings > Images`. Easymage uses these as a final fallback. |
 
 #### Practical Example
 
@@ -359,12 +359,13 @@ Easymage handles dimensions dynamically to satisfy different engine requirements
 ## 🔧 Configuration & Valves
 
 Easymage uses a hierarchical configuration system. Settings are applied in the following order of precedence (highest priority first):
-1.  **CLI Command** (e.g., `img sz=1024`) -> *Overrides everything for a single request.*
-2.  **User Valves** (Personal Settings) -> *Overrides Admin defaults.*
-3.  **Admin Valves** (System Settings) -> *Overrides Open WebUI global variables.*
+1.  **CLI Command** (e.g., `img sz=1024x1024`) -> *Overrides everything for a single request.*
+2.  **User Valves** (Personal Settings) -> *Overrides Admin defaults. Accessed via Chat Controls.*
+3.  **Admin Valves** (System Settings) -> *Overrides Open WebUI global variables. Managed by Admins.*
+4.  **Global OWUI Settings** -> *Native Open WebUI settings (e.g., `Admin Panel > Settings > Images`).*
 
 ### 1. User Valves (Personal Preferences)
-These settings are specific to **your account**. You can access them via the **Controls** menu (or `Settings > Filters > Easymage` depending on your OWUI version).
+These settings are specific to **your account** or current chat context. You can access them via the **Controls** icon (sliders) directly within a chat.
 
 | Valve | Default | Description |
 | :--- | :---: | :--- |
