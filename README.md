@@ -31,6 +31,13 @@ New to Easymage? Try these commands to see what it can do.
 
 ---
 
+### 🛡️ Privacy & Local Execution
+
+Easymage is designed to respect your privacy. If you use local backends like **LM Studio**, **Ollama**, or **Local Forge/ComfyUI**, ensure that you configure the settings correctly to prevent external API calls.
+
+*   **Local-Only Mode**: By default, Easymage might attempt to use official API endpoints for OpenAI/Gemini to increase performance.
+*   **The Switch**: To keep everything 100% local, go to **Admin Valves** and set `easy_cloud_mode` to `False`. This forces the filter to use your local Open WebUI proxies and custom URLs instead of reaching out to the internet.
+
 ### ✨ Key Features
 
 *   **🌍 Multilingual Native**: You don't need to speak English to get professional results. Write your prompt in **any language**. Easymage detects the language, translates it, and expands it into technical English optimized for the specific generation model.
@@ -389,7 +396,7 @@ These settings are managed by the **Administrator** and apply to all users unles
 
 | Valve | Default | Description |
 | :--- | :---: | :--- |
-| `easy_cloud_mode` | `True` | If `True`, ignores custom/local URLs for OpenAI/Gemini and uses the official public endpoints (`api.openai.com`, etc.). Disable this if you use a reverse proxy. |
+| `easy_cloud_mode` | `True` | **Privacy Toggle:** If `True`, it uses official endpoints for Cloud Engines. Set to `False` to force usage of your local Open WebUI URLs/Proxies (essential for LM Studio/Local setups). |
 | `generation_timeout` | `120` | Maximum time (seconds) to wait for an API response before failing. |
 | `extreme_vram_cleanup` | `False` | **Memory Safety:** If `True`, unloads *everything* (including the active Chat LLM) before generation. If `False`, only unloads *other* idle models. |
 | `persistent_vision_cache` | `False` | If `True`, saves the "Vision Capability" test results to a JSON file to speed up server restarts. |
