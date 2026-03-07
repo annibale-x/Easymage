@@ -10,18 +10,18 @@ Description: Advanced generation filter with Unified Auth, UserValves, Strict CL
 
 # --- IMPORTS ---
 
-import json
-import re
-import time
 import base64
+import json
 import os
+import re
 import sys
-import httpx  # type: ignore
-from typing import Optional, Any, List, Dict, Tuple, Union
-from pydantic import BaseModel, Field
-from open_webui.routers.images import image_generations, CreateImageForm  # type: ignore
-from open_webui.models.users import UserModel  # type: ignore
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import httpx  # type: ignore
+from open_webui.models.users import UserModel  # type: ignore
+from open_webui.routers.images import CreateImageForm, image_generations  # type: ignore
+from pydantic import BaseModel, Field
 
 EM_ICON = "✨"
 EM_VERSION = "0.9.2-beta.2"
@@ -154,9 +154,9 @@ class EasymageConfig:
         TASK: AUDIT ANALYSIS (Audit scores is 0 to 100):
                 Compare image with: '{prompt}',
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
-        
+
         RULE: If any element explicitly forbidden in the prompt is present, the AUDIT score MUST be below 50.
-        
+
         TASK: TECHNICAL EVALUATION:
                 Evaluate NOISE, GRAIN, MELTING, JAGGIES.
         MANDATORY: Respond in {lang}. NO MARKDOWN. Use plain text and • for lists and ➔ for headings.
@@ -164,7 +164,7 @@ class EasymageConfig:
     """
 
     AUDIT_STRICT = """
-        RESET: ####################### NEW DATA STREAM ##########################            
+        RESET: ####################### NEW DATA STREAM ##########################
         ENVIRONMENT: STATELESS SANDBOX.
         RULE: Context Break. Terminate processing of previous context.
         RULE: Clear your working memory buffer and analyze this input in total isolation.
@@ -174,15 +174,15 @@ class EasymageConfig:
                 Critically evaluate the image's technical execution and its alignment with the prompt's requirements.
                 Identify any contradictions, missing elements, or hallucinations.
                 Give the audit analysis and set a audit score 'AUDIT:Z' (0-100) in the last response line.
-        
-        RULE: Contradictions regarding the presence or absence of objects are CRITICAL FAILURES. 
+
+        RULE: Contradictions regarding the presence or absence of objects are CRITICAL FAILURES.
         RULE: If an element explicitly marked as absent/forbidden is detected, the AUDIT score MUST NOT exceed 30.
-        
+
         RULE: Be extremely severe in technical evaluation. Do not excuse defects.
         TASK: TECHNICAL EVALUATION (Technical scores are 0 to 100, where 0 is LOW and 100 HIGH):
                 Perform a ruthless technical audit. Identify every visual flaw.
                 Evaluate NOISE, GRAIN, MELTING, JAGGIES.
-        MANDATORY: Respond in {lang}. Be objective. NO MARKDOWN. Use plain text and • for lists and ➔ for headings. 
+        MANDATORY: Respond in {lang}. Be objective. NO MARKDOWN. Use plain text and • for lists and ➔ for headings.
         MANDATORY: Final response MUST end with a single line containing only the following metrics:
         SCORE:X AUDIT:X NOISE:X GRAIN:X MELTING:X JAGGIES:X
     """
@@ -198,7 +198,7 @@ class EasymageConfig:
     """
 
     PROMPT_ENHANCE_NEG = """
-        MANDATORY: The description must explicitly ensure that {negative} are NOT present. If necessary, 
+        MANDATORY: The description must explicitly ensure that {negative} are NOT present. If necessary,
         describe the scene in a way that confirms their absence.
     """
 
@@ -245,23 +245,23 @@ class EasymageConfig:
         "STUDIO CLEAN": "Perfect 3-point lighting, neutral background, commercial look, sharp focus. Professional.",
         "PSYCHEDELIC": "Shifting colors, kaleidoscope effects, impossible lighting sources, vibrant hallucinations.",
     }
-    
+
     PROMPT_RANDOM_TEMPLATE = """
         ROLE: You are a World-Class Photographer and Art Director.
         TASK: Create a highly detailed, realistic, and coherent image description based on:
-        
+
         1. SUBJECT CATEGORY: {category_name}
            -> Context: {category_details}
-           
+
         2. ATMOSPHERE & LIGHTING: {mood_name}
            -> Vibe: {mood_details}
-        
+
         MANDATORY RULES:
         - PHYSICAL GROUNDING: The scene must follow the laws of physics. Objects must be solid and placed in a logical environment. NO "dream logic", NO floating objects, NO melting reality (unless the category is explicitly Surrealism).
         - COHERENCE: If the subject is "Urban", it must look like a real city. If "Nature", it must be a real landscape.
         - TEXTURE & MATERIAL: Focus on tangible details (e.g., "rough concrete", "rusted metal", "soft silk", "weathered skin").
         - COMPOSITION: Describe the camera angle (e.g., "Wide shot", "Macro", "Eye level").
-        
+
         {style_instruction}
         RULE: Output ONLY the prompt description. No intro/outro.
     """
@@ -1059,7 +1059,11 @@ class ImageGenEngine:
                     else (
                         "4:3"
                         if rat > 1.3
-                        else "9:16" if rat < 0.6 else "3:4" if rat < 0.8 else "1:1"
+                        else "9:16"
+                        if rat < 0.6
+                        else "3:4"
+                        if rat < 0.8
+                        else "1:1"
                     )
                 )
 
@@ -1752,8 +1756,8 @@ class Filter:
         )
 
         aspect_ratio: str = Field(
-            default="1:1",
-            description="Target aspect ratio.",
+            default="",
+            description="Target aspect ratio. Leave empty to derive from size.",
         )
 
         seed: int = Field(
@@ -2303,22 +2307,30 @@ class Filter:
             # Build Style Instructions (Positive & Negative)
             style_parts = []
             if self.st.model.user_prompt and len(self.st.model.user_prompt.strip()) > 1:
-                style_parts.append(f"MANDATORY STYLE/THEME: {self.st.model.user_prompt}")
-            
+                style_parts.append(
+                    f"MANDATORY STYLE/THEME: {self.st.model.user_prompt}"
+                )
+
             if self.st.model.negative_prompt:
-                style_parts.append(f"ABSOLUTE PROHIBITION: Do NOT include: {self.st.model.negative_prompt}.")
+                style_parts.append(
+                    f"ABSOLUTE PROHIBITION: Do NOT include: {self.st.model.negative_prompt}."
+                )
 
             style_instruction = "\n".join(style_parts)
 
             # --- PYTHON RNG SELECTION (DOUBLE DICE) ---
             import random
-            
+
             # Roll for Category (Subject)
-            cat_name, cat_details = random.choice(list(self.config.RANDOM_CATEGORIES.items()))
-            
+            cat_name, cat_details = random.choice(
+                list(self.config.RANDOM_CATEGORIES.items())
+            )
+
             # Roll for Mood (Lighting)
-            mood_name, mood_details = random.choice(list(self.config.RANDOM_MOODS.items()))
-            
+            mood_name, mood_details = random.choice(
+                list(self.config.RANDOM_MOODS.items())
+            )
+
             if self.st.model.debug:
                 self.debug.log(f"[CTX] RNG: {cat_name} + {mood_name}")
 
@@ -2331,7 +2343,7 @@ class Filter:
                         category_details=cat_details,
                         mood_name=mood_name,
                         mood_details=mood_details,
-                        style_instruction=style_instruction
+                        style_instruction=style_instruction,
                     ),
                     "user": "Generate a random image prompt now.",
                 },
@@ -2449,7 +2461,11 @@ class Filter:
                         else (
                             "🔵"
                             if v >= 70
-                            else "🟡" if v >= 60 else "🟠" if v >= 40 else "🔴"
+                            else "🟡"
+                            if v >= 60
+                            else "🟠"
+                            if v >= 40
+                            else "🔴"
                         )
                     ),
                 }
@@ -2555,10 +2571,10 @@ class Filter:
 
 🎨 Parameters
 → Size: {self.st.model.size} (AR: {self.st.model.aspect_ratio})
-→ Steps: {self.st.model.get('steps')}
-→ Guidance: {self.st.model.get('cfg_scale')} (Distilled: {self.st.model.get('distilled_cfg_scale')})
+→ Steps: {self.st.model.get("steps")}
+→ Guidance: {self.st.model.get("cfg_scale")} (Distilled: {self.st.model.get("distilled_cfg_scale")})
 → Seed: {self.st.model.seed}
-→ Sampler: {self.st.model.get('sampler_name')} / {self.st.model.get('scheduler')}
+→ Sampler: {self.st.model.get("sampler_name")} / {self.st.model.get("scheduler")}
 
 ⚡ Execution
 → VRAM Purge: {self.valves.extreme_vram_cleanup}
@@ -2764,8 +2780,9 @@ class Filter:
                 mdl = "dall-e-3"  # FIX: Sync local var for downstream logic
 
         # 3. ASPECT RATIO & SIZE NORMALIZATION
-        sz, ar = self.st.model.get("size", "1024x1024"), self.st.model.get(
-            "aspect_ratio"
+        sz, ar = (
+            self.st.model.get("size", "1024x1024"),
+            self.st.model.get("aspect_ratio"),
         )
 
         try:
@@ -2834,6 +2851,12 @@ class Filter:
             final_h = (final_h // 8) * 8
 
             self.st.model["size"] = f"{final_w}x{final_h}"
+
+            if not ar:
+                import math
+
+                g = math.gcd(final_w, final_h)
+                self.st.model["aspect_ratio"] = f"{final_w // g}:{final_h // g}"
 
     def _apply_global_settings(self):
         """
