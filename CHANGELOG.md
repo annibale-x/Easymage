@@ -1,3 +1,8 @@
+* 2026-02-16: v0.9.4 - Aspect Ratio & CLI Robustness (Hannibal)  
+  * Fixed a critical bug where the default Aspect Ratio User Valve was overriding custom Size settings.
+  * Implemented typographic dash normalization in the Prompt Parser to support mobile/iOS auto-corrections.
+  * Updated documentation with detailed configuration hierarchy and parameter behavior.
+
 * 2026-02-16: v0.9.3 - Documentation & UX Clarity (Hannibal)  
   * Updated README.md to clarify the configuration hierarchy between CLI, User Valves, Admin Valves, and Global OWUI Settings.
   * Refined explanation of the "Size" parameter location to prevent user confusion.

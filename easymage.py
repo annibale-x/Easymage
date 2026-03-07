@@ -1,6 +1,6 @@
 """
 title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
-version: 0.9.2-beta.2
+version: 0.9.4
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
 author_url: https://openwebui.com/u/h4nn1b4l
@@ -24,7 +24,7 @@ from open_webui.routers.images import CreateImageForm, image_generations  # type
 from pydantic import BaseModel, Field
 
 EM_ICON = "✨"
-EM_VERSION = "0.9.2-beta.2"
+EM_VERSION = "0.9.4"
 CAPABILITY_CACHE_PATH = "data/easymage_vision_cache.json"
 
 # --- GLOBAL SERVICES ---

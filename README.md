@@ -1,5 +1,5 @@
 
-## ✨ Easymage 0.9.3: Multilingual Prompt Enhancer & Vision QC
+## ✨ Easymage 0.9.4: Multilingual Prompt Enhancer & Vision QC
 
 Easymage is a professional-grade orchestration filter for **Open WebUI** designed to transform your image generation workflow into a unified and intelligent experience. By simply prepending `img` triggers to any message, you activate an advanced pipeline that handles everything from multilingual prompt engineering to multi-engine generation and post-creation technical analysis.
 
@@ -10,7 +10,7 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 ![License](https://img.shields.io/github/license/annibale-x/Easymage?color=green)
 
 
-### 🆕 What's New in v0.9.3
+### 🆕 What's New in v0.9.4 (vs v0.9.3)
 
 -   **Aspect Ratio Intelligence**: Fixed a critical bug where a hidden default aspect ratio was overriding custom dimensions. The system now mathematically infers the correct ratio from your `Size` setting automatically. It prioritizes explicit `Aspect Ratio` values only when manually set, recalculating the image height to ensure perfect proportions.
 -   **CLI Typographic Normalization**: The Prompt Parser now intercepts and normalizes typographic dashes (like the em-dash `—` or en-dash `–` automatically inserted by mobile keyboards and macOS/iOS) back into valid CLI parameters (`--`), preventing syntax errors on smartphones.
