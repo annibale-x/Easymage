@@ -1,5 +1,5 @@
 """
-title: Easymage - Multilingual Prompt Enhancer & Vision QC Image Generator
+title: ✨Easymage: Generative Imaging & Prompt Engineering Filter
 version: 0.9.4
 repo_url: https://github.com/annibale-x/Easymage
 author: Hannibal
