@@ -14,6 +14,7 @@ This filter acts as an **Intelligent Dispatcher**, unlocking advanced, engine-sp
 
 -   **Aspect Ratio Intelligence**: Fixed a critical bug where a hidden default aspect ratio was overriding custom dimensions. The system now mathematically infers the correct ratio from your `Size` setting automatically. It prioritizes explicit `Aspect Ratio` values only when manually set, recalculating the image height to ensure perfect proportions.
 -   **CLI Typographic Normalization**: The Prompt Parser now intercepts and normalizes typographic dashes (like the em-dash `—` or en-dash `–` automatically inserted by mobile keyboards and macOS/iOS) back into valid CLI parameters (`--`), preventing syntax errors on smartphones.
+-   **Privacy & Local Setup Documentation**: Added a dedicated section explaining how to force 100% local execution using the `easy_cloud_mode` toggle, specifically for users running backends like LM Studio or local ComfyUI.
 
 ---
 
@@ -30,13 +31,6 @@ New to Easymage? Try these commands to see what it can do.
 | **Native Lang**| `img Un gatto che beve caffè` | **Write in any language!** Easymage translates and optimizes it for the model. |
 
 ---
-
-### 🛡️ Privacy & Local Execution
-
-Easymage is designed to respect your privacy. If you use local backends like **LM Studio**, **Ollama**, or **Local Forge/ComfyUI**, ensure that you configure the settings correctly to prevent external API calls.
-
-*   **Local-Only Mode**: By default, Easymage might attempt to use official API endpoints for OpenAI/Gemini to increase performance.
-*   **The Switch**: To keep everything 100% local, go to **Admin Valves** and set `easy_cloud_mode` to `False`. This forces the filter to use your local Open WebUI proxies and custom URLs instead of reaching out to the internet.
 
 ### ✨ Key Features
 
@@ -396,7 +390,7 @@ These settings are managed by the **Administrator** and apply to all users unles
 
 | Valve | Default | Description |
 | :--- | :---: | :--- |
-| `easy_cloud_mode` | `True` | **Privacy Toggle:** If `True`, it uses official endpoints for Cloud Engines. Set to `False` to force usage of your local Open WebUI URLs/Proxies (essential for LM Studio/Local setups). |
+| `easy_cloud_mode` | `True` | If `True`, ignores custom/local URLs for OpenAI/Gemini and uses the official public endpoints (`api.openai.com`, etc.). Disable this if you use a reverse proxy. |
 | `generation_timeout` | `120` | Maximum time (seconds) to wait for an API response before failing. |
 | `extreme_vram_cleanup` | `False` | **Memory Safety:** If `True`, unloads *everything* (including the active Chat LLM) before generation. If `False`, only unloads *other* idle models. |
 | `persistent_vision_cache` | `False` | If `True`, saves the "Vision Capability" test results to a JSON file to speed up server restarts. |
@@ -404,6 +398,16 @@ These settings are managed by the **Administrator** and apply to all users unles
 | `openai_auth` | `""` | Global fallback API Key for OpenAI. |
 | `gemini_auth` | `""` | Global fallback API Key for Gemini. |
 | `automatic1111_auth` | `""` | Global fallback credentials for Forge (`user:password`). |
+
+---
+
+### 🛡️ Privacy & Local Execution
+
+Easymage is designed to respect your privacy. If you use local backends like **LM Studio**, **Ollama**, or **Local Forge/ComfyUI**, ensure that you configure the settings correctly to prevent external API calls.
+
+*   **Local-Only Mode**: By default, Easymage might attempt to use official API endpoints for OpenAI/Gemini to increase performance.
+*   **The Switch**: To keep everything 100% local, go to **Admin Valves** and set `easy_cloud_mode` to `False`. This forces the filter to use your local Open WebUI proxies and custom URLs instead of reaching out to the internet.
+
 ---
 
 ### 📌 Output, Citations & Performance
